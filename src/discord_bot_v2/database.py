@@ -41,6 +41,20 @@ class GoalProgress:
     current: Decimal
 
 
+@dataclass(frozen=True, slots=True)
+class LogChannels:
+    entry_channel_id: int
+    output_channel_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class CashPayout:
+    member_id: int
+    progress: Decimal
+    base_share: Decimal
+    amount: Decimal
+
+
 class Database:
     """Small repository that opens one short-lived connection per operation."""
 
@@ -87,6 +101,7 @@ class Database:
                     product_id INTEGER,
                     product_name TEXT NOT NULL,
                     quantity TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
                 );
@@ -125,6 +140,55 @@ class Database:
                     message_id INTEGER NOT NULL,
                     PRIMARY KEY (guild_id, message_id)
                 );
+                CREATE TABLE IF NOT EXISTS log_channels (
+                    guild_id INTEGER PRIMARY KEY,
+                    entry_channel_id INTEGER NOT NULL,
+                    output_channel_id INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS financial_settings (
+                    guild_id INTEGER PRIMARY KEY,
+                    reserve_rate TEXT NOT NULL DEFAULT '0.30',
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS cash_log_channels (
+                    guild_id INTEGER PRIMARY KEY,
+                    channel_id INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS cash_transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    actor_id INTEGER NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('income', 'expense', 'payout')),
+                    amount TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    goal_id INTEGER,
+                    member_id INTEGER,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS goal_settlements (
+                    goal_id INTEGER PRIMARY KEY,
+                    guild_id INTEGER NOT NULL,
+                    cash_before TEXT NOT NULL,
+                    reserve_rate TEXT NOT NULL,
+                    distributable TEXT NOT NULL,
+                    total_paid TEXT NOT NULL,
+                    retained TEXT NOT NULL,
+                    participant_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (goal_id) REFERENCES goals(id)
+                );
+                CREATE TABLE IF NOT EXISTS goal_payouts (
+                    goal_id INTEGER NOT NULL,
+                    member_id INTEGER NOT NULL,
+                    progress TEXT NOT NULL,
+                    base_share TEXT NOT NULL,
+                    amount TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (goal_id, member_id),
+                    FOREIGN KEY (goal_id) REFERENCES goals(id)
+                );
                 """
             )
             columns = {
@@ -133,6 +197,14 @@ class Database:
             }
             if "panel_message_id" not in columns:
                 connection.execute("ALTER TABLE farm_channels ADD COLUMN panel_message_id INTEGER")
+            output_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(stock_outputs)").fetchall()
+            }
+            if "reason" not in output_columns:
+                connection.execute(
+                    "ALTER TABLE stock_outputs ADD COLUMN reason TEXT NOT NULL DEFAULT ''"
+                )
 
     def list_products(self, guild_id: int) -> list[Product]:
         with self._connect() as connection:
@@ -190,6 +262,14 @@ class Database:
                 (guild_id,),
             ).fetchall()
         return [FarmChannel(**dict(row)) for row in rows]
+
+    def delete_farm_channel(self, channel_id: int) -> FarmChannel | None:
+        farm_channel = self.get_farm_channel_by_channel(channel_id)
+        if farm_channel is None:
+            return None
+        with self._connect() as connection:
+            connection.execute("DELETE FROM farm_channels WHERE channel_id = ?", (channel_id,))
+        return farm_channel
 
     def save_farm_channel(
         self,
@@ -289,10 +369,19 @@ class Database:
         return totals
 
     def add_output(
-        self, *, guild_id: int, actor_id: int, product: Product, quantity: Decimal
+        self,
+        *,
+        guild_id: int,
+        actor_id: int,
+        product: Product,
+        quantity: Decimal,
+        reason: str,
     ) -> int:
         if quantity <= 0:
             raise ValueError("A quantidade deve ser maior que zero")
+        clean_reason = " ".join(reason.split())
+        if not clean_reason or len(clean_reason) > 500:
+            raise ValueError("O motivo deve ter entre 1 e 500 caracteres")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             entry_rows = connection.execute(
@@ -312,14 +401,15 @@ class Database:
                 raise ValueError(f"Estoque insuficiente. Disponível: {format(available, 'f')}")
             cursor = connection.execute(
                 """INSERT INTO stock_outputs (
-                    guild_id, actor_id, product_id, product_name, quantity, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)""",
+                    guild_id, actor_id, product_id, product_name, quantity, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
                     guild_id,
                     actor_id,
                     product.id,
                     product.name,
                     format(quantity, "f"),
+                    clean_reason,
                     datetime.now(UTC).isoformat(),
                 ),
             )
@@ -349,6 +439,15 @@ class Database:
                 ON CONFLICT (goal_id, product_id) DO UPDATE SET target = excluded.target""",
                 (goal_id, product.id, product.name, format(target, "f")),
             )
+
+    def update_goal_period(self, goal_id: int, start_at: str, end_at: str) -> None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE goals SET start_at = ?, end_at = ? WHERE id = ?",
+                (start_at, end_at, goal_id),
+            )
+        if cursor.rowcount == 0:
+            raise ValueError("Meta não encontrada")
 
     def activate_goal(self, guild_id: int, goal_id: int) -> None:
         with self._connect() as connection:
@@ -423,3 +522,198 @@ class Database:
                 (guild_id,),
             ).fetchall()
         return [(row["channel_id"], row["message_id"]) for row in rows]
+
+    def set_log_channels(
+        self, guild_id: int, entry_channel_id: int, output_channel_id: int
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO log_channels (
+                    guild_id, entry_channel_id, output_channel_id, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT (guild_id) DO UPDATE SET
+                    entry_channel_id = excluded.entry_channel_id,
+                    output_channel_id = excluded.output_channel_id,
+                    updated_at = excluded.updated_at""",
+                (
+                    guild_id,
+                    entry_channel_id,
+                    output_channel_id,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+
+    def get_log_channels(self, guild_id: int) -> LogChannels | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT entry_channel_id, output_channel_id FROM log_channels
+                WHERE guild_id = ?""",
+                (guild_id,),
+            ).fetchone()
+        return LogChannels(**dict(row)) if row else None
+
+    def get_reserve_rate(self, guild_id: int) -> Decimal:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT reserve_rate FROM financial_settings WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+        return Decimal(row["reserve_rate"]) if row else Decimal("0.30")
+
+    def set_cash_log_channel(self, guild_id: int, channel_id: int) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO cash_log_channels (guild_id, channel_id, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT (guild_id) DO UPDATE SET
+                    channel_id = excluded.channel_id,
+                    updated_at = excluded.updated_at""",
+                (guild_id, channel_id, datetime.now(UTC).isoformat()),
+            )
+
+    def get_cash_log_channel(self, guild_id: int) -> int | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT channel_id FROM cash_log_channels WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+        return int(row["channel_id"]) if row else None
+
+    def set_reserve_rate(self, guild_id: int, rate: Decimal) -> None:
+        if rate < 0 or rate > 1:
+            raise ValueError("A reserva deve estar entre 0% e 100%")
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO financial_settings (guild_id, reserve_rate, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT (guild_id) DO UPDATE SET
+                    reserve_rate = excluded.reserve_rate,
+                    updated_at = excluded.updated_at""",
+                (guild_id, format(rate, "f"), datetime.now(UTC).isoformat()),
+            )
+
+    def cash_balance(self, guild_id: int) -> Decimal:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT kind, amount FROM cash_transactions WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchall()
+        balance = Decimal(0)
+        for row in rows:
+            amount = Decimal(row["amount"])
+            balance += amount if row["kind"] == "income" else -amount
+        return balance
+
+    def add_cash_transaction(
+        self,
+        *,
+        guild_id: int,
+        actor_id: int,
+        kind: str,
+        amount: Decimal,
+        reason: str,
+    ) -> int:
+        if kind not in {"income", "expense"}:
+            raise ValueError("Tipo de movimentação financeira inválido")
+        if amount <= 0:
+            raise ValueError("O valor deve ser maior que zero")
+        clean_reason = " ".join(reason.split())
+        if not clean_reason or len(clean_reason) > 500:
+            raise ValueError("O motivo deve ter entre 1 e 500 caracteres")
+        if kind == "expense" and amount > self.cash_balance(guild_id):
+            raise ValueError("Saldo insuficiente no caixa")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """INSERT INTO cash_transactions (
+                    guild_id, actor_id, kind, amount, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    guild_id,
+                    actor_id,
+                    kind,
+                    format(amount, "f"),
+                    clean_reason,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise RuntimeError("SQLite não retornou o identificador financeiro")
+            return cursor.lastrowid
+
+    def goal_is_settled(self, goal_id: int) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM goal_settlements WHERE goal_id = ?", (goal_id,)
+            ).fetchone()
+        return row is not None
+
+    def commit_goal_settlement(
+        self,
+        *,
+        guild_id: int,
+        goal_id: int,
+        actor_id: int,
+        cash_before: Decimal,
+        reserve_rate: Decimal,
+        distributable: Decimal,
+        payouts: list[CashPayout],
+    ) -> None:
+        total_paid = sum((item.amount for item in payouts), Decimal(0))
+        retained = cash_before - total_paid
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute(
+                "SELECT 1 FROM goal_settlements WHERE goal_id = ?", (goal_id,)
+            ).fetchone():
+                raise ValueError("Esta meta já teve o caixa distribuído")
+            connection.execute(
+                """INSERT INTO goal_settlements (
+                    goal_id, guild_id, cash_before, reserve_rate, distributable,
+                    total_paid, retained, participant_count, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    goal_id,
+                    guild_id,
+                    format(cash_before, "f"),
+                    format(reserve_rate, "f"),
+                    format(distributable, "f"),
+                    format(total_paid, "f"),
+                    format(retained, "f"),
+                    len(payouts),
+                    now,
+                ),
+            )
+            for payout in payouts:
+                connection.execute(
+                    """INSERT INTO goal_payouts (
+                        goal_id, member_id, progress, base_share, amount, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        goal_id,
+                        payout.member_id,
+                        format(payout.progress, "f"),
+                        format(payout.base_share, "f"),
+                        format(payout.amount, "f"),
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """INSERT INTO cash_transactions (
+                        guild_id, actor_id, kind, amount, reason,
+                        goal_id, member_id, created_at
+                    ) VALUES (?, ?, 'payout', ?, ?, ?, ?, ?)""",
+                    (
+                        guild_id,
+                        actor_id,
+                        format(payout.amount, "f"),
+                        f"Pagamento da meta #{goal_id}",
+                        goal_id,
+                        payout.member_id,
+                        now,
+                    ),
+                )
+            connection.execute(
+                "UPDATE goals SET status = 'closed' WHERE guild_id = ? AND id = ?",
+                (guild_id, goal_id),
+            )

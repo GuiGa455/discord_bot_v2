@@ -1,4 +1,2 @@
-# Runtime dependencies for simple deployments. The canonical specification is pyproject.toml.
-discord.py>=2.4,<3
-python-dotenv>=1.0,<2
-tzdata>=2025.2; platform_system == "Windows"
+# Instala o próprio projeto e as dependências declaradas no pyproject.toml.
+-e .

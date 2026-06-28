@@ -40,10 +40,14 @@ def format_totals(totals: dict[str, Decimal]) -> str:
     return content if len(content) <= 1024 else content[:1000] + "\n… resultado resumido"
 
 
+def format_usd(value: Decimal) -> str:
+    return f"${value:,.2f}"
+
+
 def progress_bar(current: Decimal, target: Decimal, size: int = 10) -> str:
     ratio = min(max(current / target, Decimal(0)), Decimal(1))
     filled = int(ratio * size)
-    return "█" * filled + "░" * (size - filled)
+    return "●" * filled + "○" * (size - filled)
 
 
 def format_progress(items: list[GoalProgress]) -> str:
@@ -53,10 +57,12 @@ def format_progress(items: list[GoalProgress]) -> str:
     for item in items:
         achieved = item.current >= item.target
         marker = "✅" if achieved else "📦"
+        ratio = min(max(item.current / item.target, Decimal(0)), Decimal(1))
+        percentage = (ratio * 100).quantize(Decimal("0.1"))
         lines.append(
-            f"{marker} **{item.product.name}**\n"
-            f"`{progress_bar(item.current, item.target)}` "
-            f"{format(item.current, 'f')}/{format(item.target, 'f')}"
+            f"{marker} **{item.product.name}** — **{format(percentage, 'f')}%** "
+            f"`{progress_bar(item.current, item.target)}`\n"
+            f"`{format(item.current, 'f')} / {format(item.target, 'f')}`"
         )
     content = "\n".join(lines)
     return content if len(content) <= 1024 else content[:1000] + "\n… progresso resumido"
@@ -108,6 +114,15 @@ def build_admin_embed(database: Database, guild_id: int) -> discord.Embed:
         value=format_totals(database.stock_totals(guild_id)),
         inline=False,
     )
+    reserve_rate = database.get_reserve_rate(guild_id)
+    embed.add_field(
+        name="Caixa da firma",
+        value=(
+            f"**Saldo:** {format_usd(database.cash_balance(guild_id))}\n"
+            f"**Reserva:** {format(reserve_rate * 100, 'f')}%"
+        ),
+        inline=False,
+    )
     goal = database.get_active_goal(guild_id)
     if goal is None:
         embed.add_field(name="Meta ativa", value="Nenhuma meta ativa.", inline=False)
@@ -119,8 +134,9 @@ def build_admin_embed(database: Database, guild_id: int) -> discord.Embed:
         ratio, achieved = overall_progress(items)
         percentage = (ratio * 100).quantize(Decimal("0.1"))
         progress_lines.append(
-            f"{'✅' if achieved else '⏳'} <@{farm_channel.member_id}> "
-            f"`{progress_bar(ratio, Decimal(1))}` **{format(percentage, 'f')}%**"
+            f"{'✅' if achieved else '⏳'} <@{farm_channel.member_id}> — "
+            f"**{format(percentage, 'f')}%** "
+            f"`{progress_bar(ratio, Decimal(1))}`"
         )
     summary = "\n".join(progress_lines) or "Nenhuma sala FARME criada."
     embed.add_field(

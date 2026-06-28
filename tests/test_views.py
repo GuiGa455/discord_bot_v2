@@ -7,6 +7,9 @@ import pytest
 
 from discord_bot_v2.database import Database, FarmChannel, Product
 from discord_bot_v2.views import (
+    CashTransactionModal,
+    DeleteFarmRoomView,
+    EditGoalModal,
     FarmPanel,
     GoalBuilderView,
     GoalPeriodModal,
@@ -39,6 +42,8 @@ def interaction(guild_id: int = 1) -> Mock:
     item.response.send_message = AsyncMock()
     item.response.send_modal = AsyncMock()
     item.response.defer = AsyncMock()
+    item.followup = Mock()
+    item.followup.send = AsyncMock()
     item.delete_original_response = AsyncMock()
     return item
 
@@ -73,9 +78,15 @@ async def test_product_modal_rejects_duplicate(database: Database) -> None:
 @pytest.mark.asyncio
 async def test_quantity_modal_stores_decimal_and_actor(database: Database) -> None:
     product = database.add_product(1, "Petróleo")
-    modal = QuantityModal(database, product, member_id=20)
+    panel_message = Mock(spec=discord.Message)
+    panel_message.edit = AsyncMock()
+    modal = QuantityModal(database, product, member_id=20, panel_message=panel_message)
     modal.quantity._value = "12,50"
     item = interaction()
+    item.delete_original_response.side_effect = discord.NotFound(
+        Mock(status=404, reason="Not Found"),
+        {"message": "Unknown Message", "code": 10008},
+    )
 
     with patch("discord_bot_v2.views._is_administrator", return_value=True):
         await modal.on_submit(item)
@@ -90,6 +101,7 @@ async def test_quantity_modal_stores_decimal_and_actor(database: Database) -> No
     assert row == (20, 10, 1, "12.50")
     item.channel.send.assert_not_awaited()
     item.delete_original_response.assert_awaited_once()
+    panel_message.edit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -180,12 +192,27 @@ async def test_output_modal_updates_stock(database: Database) -> None:
     )
     modal = OutputQuantityModal(database, product)
     modal.quantity._value = "2,5"
+    modal.reason._value = "Venda para cliente"
     item = interaction()
 
     with patch("discord_bot_v2.views._require_admin", AsyncMock(return_value=True)):
         await modal.on_submit(item)
 
     assert database.stock_totals(1)["Cobre"] == Decimal("7.5")
+
+
+@pytest.mark.asyncio
+async def test_cash_income_modal_updates_balance(database: Database) -> None:
+    modal = CashTransactionModal(database, "income")
+    modal.amount._value = "2500.50"
+    modal.reason._value = "Venda de produtos"
+    item = interaction()
+
+    with patch("discord_bot_v2.views._require_admin", AsyncMock(return_value=True)):
+        await modal.on_submit(item)
+
+    assert database.cash_balance(1) == Decimal("2500.50")
+    item.response.send_message.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -216,6 +243,53 @@ async def test_goal_period_and_target_modals_build_goal(database: Database) -> N
 
 
 @pytest.mark.asyncio
+async def test_edit_goal_modal_updates_period(database: Database) -> None:
+    database.add_product(1, "Ferro")
+    goal = database.create_goal(
+        1,
+        "2026-01-01T03:00:00+00:00",
+        "2026-02-01T02:59:59+00:00",
+    )
+    modal = EditGoalModal(database, goal.id, goal.start_at, goal.end_at)
+    modal.start_date._value = "01/03/2026"
+    modal.end_date._value = "31/03/2026"
+    item = interaction()
+
+    with patch("discord_bot_v2.views._require_admin", AsyncMock(return_value=True)):
+        await modal.on_submit(item)
+
+    with database._connect() as connection:
+        row = connection.execute(
+            "SELECT start_at, end_at FROM goals WHERE id = ?", (goal.id,)
+        ).fetchone()
+    assert row[0].startswith("2026-03-01")
+    assert row[1].startswith("2026-04-01")
+    item.response.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_goal_target_recreates_expired_builder(database: Database) -> None:
+    product = database.add_product(1, "Ferro")
+    goal = database.create_goal(1, "2026-01-01", "2026-12-31")
+    expired_message = Mock(spec=discord.Message)
+    expired_message.edit = AsyncMock(
+        side_effect=discord.NotFound(
+            Mock(status=404, reason="Not Found"),
+            {"message": "Unknown Message", "code": 10008},
+        )
+    )
+    modal = GoalTargetModal(database, goal.id, product, expired_message)
+    modal.target._value = "100"
+    item = interaction()
+
+    with patch("discord_bot_v2.views._require_admin", AsyncMock(return_value=True)):
+        await modal.on_submit(item)
+
+    item.followup.send.assert_awaited_once()
+    assert isinstance(item.followup.send.await_args.kwargs["view"], GoalBuilderView)
+
+
+@pytest.mark.asyncio
 async def test_product_selector_deletes_temporary_menu(database: Database) -> None:
     product = database.add_product(1, "Ferro")
     select = ProductSelect(database, [product], member_id=10)
@@ -229,3 +303,31 @@ async def test_product_selector_deletes_temporary_menu(database: Database) -> No
     item.response.send_modal.assert_awaited_once()
     item.message.delete.assert_awaited_once()
     item.delete_original_response.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_delete_farm_room_removes_channel_and_goal_participant(
+    database: Database,
+) -> None:
+    database.save_farm_channel(1, 10, 100, 1000)
+    guild = Mock(spec=discord.Guild)
+    guild.id = 1
+    guild.get_member.return_value = None
+    channel = Mock(spec=discord.TextChannel)
+    channel.delete = AsyncMock()
+    guild.get_channel.return_value = channel
+    view = DeleteFarmRoomView(database, guild, database.list_farm_channels(1))
+    view.source_message = Mock(spec=discord.InteractionMessage)
+    view.source_message.delete = AsyncMock()
+    select = view.children[0]
+    select._values = ["10"]
+    item = interaction()
+    item.guild = guild
+    item.message = None
+
+    with patch("discord_bot_v2.views._require_admin", AsyncMock(return_value=True)):
+        await select.callback(item)
+
+    channel.delete.assert_awaited_once()
+    assert database.list_farm_channels(1) == []
+    view.source_message.delete.assert_awaited_once()

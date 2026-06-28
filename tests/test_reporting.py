@@ -24,8 +24,8 @@ def test_parse_and_display_brazilian_period() -> None:
 def test_report_formatters() -> None:
     item = GoalProgress(Product(1, "Ferro"), Decimal("100"), Decimal("50"))
 
-    assert progress_bar(Decimal("50"), Decimal("100")) == "█████░░░░░"
-    assert "50/100" in format_progress([item])
+    assert progress_bar(Decimal("50"), Decimal("100")) == "●●●●●○○○○○"
+    assert "50 / 100" in format_progress([item])
     assert "Ferro" in format_totals({"Ferro": Decimal("20")})
     assert "Nenhum" in format_totals({})
 
@@ -53,4 +53,4 @@ def test_build_panel_embeds(tmp_path) -> None:
     admin_embed = build_admin_embed(database, 1)
 
     assert "✅" in farm_embed.fields[0].value
-    assert "100.0%" in admin_embed.fields[2].value
+    assert "100.0%" in admin_embed.fields[3].value

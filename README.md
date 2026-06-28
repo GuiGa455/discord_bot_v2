@@ -31,7 +31,7 @@ Developer Portal.
 Com o ambiente virtual ativado, execute:
 
 ```powershell
-python main.py
+python -m discord_bot_v2
 ```
 
 Quando a conexão estiver pronta, o terminal exibirá `Bot ready`. No Discord, use
@@ -83,6 +83,42 @@ do arquivo com o bot desligado. É possível mudar o local usando `DATABASE_PATH
 - As salas FARME mostram barras de progresso e permitem ao titular consultar seu período.
 - Ao atingir ou ultrapassar todos os produtos, a pessoa aparece como meta batida no painel.
 
+### Canais de auditoria
+
+Configure dois canais separados com:
+
+```text
+/configurar_logs_fdm canal_entradas:#entradas canal_saidas:#saidas
+```
+
+Entradas registram pessoa, produto, quantidade e autor. Saídas registram produto,
+quantidade e administrador responsável. O bot precisa poder visualizar e enviar mensagens
+nos dois canais.
+
+Se uma sala FARME for apagada, seu vínculo é removido automaticamente e a pessoa deixa
+de participar da meta ativa. O histórico de coletas permanece preservado no SQLite.
+
+### Caixa e divisão do lucro
+
+O painel administrativo possui controles para **Entrada no caixa**, **Saída do caixa** e
+**Reserva da firma**. A moeda padrão é dólar (`USD`) e a reserva inicial é 30%.
+
+Ao clicar em **Encerrar meta**, o bot apresenta uma prévia antes da confirmação. Somente
+pessoas com sala ativa e alguma coleta no período participam. A parcela integral é o valor
+distribuível dividido pelo número de participantes; cada pagamento é essa parcela multiplicada
+pelo progresso geral da pessoa. A quantia não conquistada permanece no caixa.
+
+Depois da confirmação, o fechamento não pode ser executado novamente para a mesma meta,
+o caixa é atualizado e cada sala FARME recebe uma mensagem com o pagamento registrado.
+
+Configure o canal que receberá entradas, despesas e fechamentos do caixa com:
+
+```text
+/configurar_log_caixa_fdm canal:#log-caixa
+```
+
+O bot precisa das permissões **Ver canal** e **Enviar mensagens** nesse destino.
+
 ## Estrutura
 
 ```text
@@ -91,6 +127,23 @@ tests/               testes automatizados
 .github/workflows/   integração contínua
 pyproject.toml       dependências e configuração das ferramentas
 ```
+
+## Hospedagem
+
+Use Python 3.11 ou superior. Em uma hospedagem baseada em Git, configure:
+
+```text
+Build: pip install -r requirements.txt
+Start/Worker: python -m discord_bot_v2
+```
+
+O `Procfile` já declara o processo como `worker`, pois bots Discord não são servidores
+HTTP. Cadastre `DISCORD_TOKEN`, `DISCORD_INTENTS`, `LOG_LEVEL` e `DATABASE_PATH` como
+variáveis de ambiente da plataforma; não envie o arquivo `.env`.
+
+O SQLite precisa de armazenamento persistente. Monte um volume e aponte, por exemplo,
+`DATABASE_PATH=/data/bot.db`. Sem volume, algumas hospedagens apagam o banco em cada
+reinicialização ou novo deploy. Mantenha apenas uma instância do bot usando esse arquivo.
 
 ## Evolução para ML/MLOps
 

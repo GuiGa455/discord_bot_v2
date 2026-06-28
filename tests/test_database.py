@@ -58,13 +58,23 @@ def test_stock_totals_and_outputs(tmp_path) -> None:
     )
 
     output_id = database.add_output(
-        guild_id=1, actor_id=99, product=product, quantity=Decimal("2.25")
+        guild_id=1,
+        actor_id=99,
+        product=product,
+        quantity=Decimal("2.25"),
+        reason="Venda",
     )
 
     assert output_id == 1
     assert database.stock_totals(1) == {"Cobre": Decimal("8.25")}
     with pytest.raises(ValueError, match="Estoque insuficiente"):
-        database.add_output(guild_id=1, actor_id=99, product=product, quantity=Decimal("9"))
+        database.add_output(
+            guild_id=1,
+            actor_id=99,
+            product=product,
+            quantity=Decimal("9"),
+            reason="Venda",
+        )
 
 
 def test_product_totals_filter_member_and_period(tmp_path) -> None:
@@ -140,3 +150,33 @@ def test_close_active_goal(tmp_path) -> None:
     assert database.close_active_goal(1) is True
     assert database.get_active_goal(1) is None
     assert database.close_active_goal(1) is False
+
+
+def test_update_goal_period(tmp_path) -> None:
+    database = Database(str(tmp_path / "bot.db"))
+    database.initialize()
+    goal = database.create_goal(1, "2026-01-01", "2026-01-31")
+
+    database.update_goal_period(goal.id, "2026-02-01", "2026-02-28")
+    with database._connect() as connection:
+        row = connection.execute(
+            "SELECT start_at, end_at FROM goals WHERE id = ?", (goal.id,)
+        ).fetchone()
+
+    assert tuple(row) == ("2026-02-01", "2026-02-28")
+
+
+def test_log_channels_and_deleted_farm_link(tmp_path) -> None:
+    database = Database(str(tmp_path / "bot.db"))
+    database.initialize()
+    database.set_log_channels(1, 200, 300)
+    database.save_farm_channel(1, 10, 100, 1000)
+
+    channels = database.get_log_channels(1)
+    removed = database.delete_farm_channel(100)
+
+    assert channels.entry_channel_id == 200
+    assert channels.output_channel_id == 300
+    assert removed.member_id == 10
+    assert database.list_farm_channels(1) == []
+    assert database.delete_farm_channel(100) is None

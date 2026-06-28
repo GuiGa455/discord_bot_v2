@@ -11,7 +11,7 @@ from discord_bot_v2.config import Settings
 from discord_bot_v2.database import Database
 from discord_bot_v2.logging_config import configure_logging
 from discord_bot_v2.reporting import build_admin_embed, build_farm_embed
-from discord_bot_v2.views import ConfigPanel, FarmPanel
+from discord_bot_v2.views import ConfigPanel, FarmPanel, refresh_guild_panels
 
 LOGGER = logging.getLogger(__name__)
 
@@ -30,6 +30,14 @@ class DiscordBot(discord.Client):
             name="configurar_bot_fdm",
             description="Publica o painel administrativo de coleta",
         )(self.configure_bot_fdm)
+        self.tree.command(
+            name="configurar_logs_fdm",
+            description="Define os canais de log de entradas e saídas",
+        )(self.configurar_logs_fdm)
+        self.tree.command(
+            name="configurar_log_caixa_fdm",
+            description="Define o canal de auditoria do caixa",
+        )(self.configurar_log_caixa_fdm)
 
     async def setup_hook(self) -> None:
         self.database.initialize()
@@ -44,6 +52,90 @@ class DiscordBot(discord.Client):
     async def slash_oi(self, interaction: discord.Interaction) -> None:
         """Respond to the native /oi interaction."""
         await interaction.response.send_message("Olá! 👋")
+
+    async def configurar_logs_fdm(
+        self,
+        interaction: discord.Interaction,
+        canal_entradas: discord.TextChannel,
+        canal_saidas: discord.TextChannel,
+    ) -> None:
+        """Persist the audit destinations for one guild."""
+        if (
+            not isinstance(interaction.user, discord.Member)
+            or not interaction.user.guild_permissions.administrator
+        ):
+            await interaction.response.send_message(
+                "Apenas administradores podem executar este comando.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return
+        if interaction.guild_id is None or interaction.guild is None:
+            await interaction.response.send_message(
+                "Este comando só pode ser usado dentro de um servidor.", ephemeral=True
+            )
+            return
+        bot_member = interaction.guild.me
+        inaccessible: list[str] = []
+        if bot_member is None:
+            inaccessible = [canal_entradas.mention, canal_saidas.mention]
+        else:
+            for channel in (canal_entradas, canal_saidas):
+                permissions = channel.permissions_for(bot_member)
+                if not permissions.view_channel or not permissions.send_messages:
+                    inaccessible.append(channel.mention)
+        if inaccessible:
+            await interaction.response.send_message(
+                "O bot precisa de **Ver canal** e **Enviar mensagens** em: "
+                + ", ".join(inaccessible),
+                ephemeral=True,
+                delete_after=15,
+            )
+            return
+        self.database.set_log_channels(interaction.guild_id, canal_entradas.id, canal_saidas.id)
+        await interaction.response.send_message(
+            f"Logs configurados: entradas em {canal_entradas.mention} e "
+            f"saídas em {canal_saidas.mention}.",
+            ephemeral=True,
+            delete_after=15,
+        )
+
+    async def configurar_log_caixa_fdm(
+        self,
+        interaction: discord.Interaction,
+        canal: discord.TextChannel,
+    ) -> None:
+        """Persist the cash audit destination for one guild."""
+        if (
+            not isinstance(interaction.user, discord.Member)
+            or not interaction.user.guild_permissions.administrator
+        ):
+            await interaction.response.send_message(
+                "Apenas administradores podem executar este comando.",
+                ephemeral=True,
+                delete_after=10,
+            )
+            return
+        if interaction.guild_id is None or interaction.guild is None:
+            await interaction.response.send_message(
+                "Este comando só pode ser usado dentro de um servidor.", ephemeral=True
+            )
+            return
+        bot_member = interaction.guild.me
+        permissions = canal.permissions_for(bot_member) if bot_member else None
+        if permissions is None or not permissions.view_channel or not permissions.send_messages:
+            await interaction.response.send_message(
+                "O bot precisa de **Ver canal** e **Enviar mensagens** nesse canal.",
+                ephemeral=True,
+                delete_after=15,
+            )
+            return
+        self.database.set_cash_log_channel(interaction.guild_id, canal.id)
+        await interaction.response.send_message(
+            f"Log do caixa configurado em {canal.mention}.",
+            ephemeral=True,
+            delete_after=15,
+        )
 
     async def configure_bot_fdm(self, interaction: discord.Interaction) -> None:
         """Publish the administrator panel in the current channel."""
@@ -154,6 +246,17 @@ class DiscordBot(discord.Client):
 
     async def on_disconnect(self) -> None:
         LOGGER.warning("Disconnected from Discord gateway; reconnection will be attempted")
+
+    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
+        """Stop counting a member in goals when their FARME channel is deleted."""
+        removed = self.database.delete_farm_channel(channel.id)
+        if removed is None:
+            return
+        LOGGER.info(
+            "Farm channel link removed",
+            extra={"guild_id": channel.guild.id},
+        )
+        await refresh_guild_panels(channel.guild, self.database)
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author == self.user:

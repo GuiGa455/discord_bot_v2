@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import sqlite3
 import unicodedata
+from collections.abc import Awaitable
 from contextlib import suppress
 from decimal import Decimal, InvalidOperation
 
 import discord
 
-from discord_bot_v2.database import Database, Product
+from discord_bot_v2.audit import send_cash_log, send_entry_log, send_output_log
+from discord_bot_v2.database import Database, FarmChannel, Product
+from discord_bot_v2.finance import SettlementPreview, build_settlement_preview, money
 from discord_bot_v2.reporting import (
     build_admin_embed,
     build_farm_embed,
+    display_period,
     format_totals,
     parse_period,
 )
@@ -51,35 +56,81 @@ def _channel_name(member: discord.Member) -> str:
     return f"farme-{safe_name or member.id}"[:100]
 
 
-async def refresh_panels(interaction: discord.Interaction, database: Database) -> None:
-    """Refresh known admin and farm panel embeds after a state change."""
-    guild = interaction.guild
-    if guild is None:
-        return
+async def refresh_guild_panels(
+    guild: discord.Guild,
+    database: Database,
+    *,
+    farm_member_id: int | None = None,
+    refresh_all_farms: bool = False,
+) -> None:
+    """Refresh panels concurrently, optionally limiting FARME updates to one member."""
+    tasks: list[asyncio.Task[None]] = []
+    admin_embed = build_admin_embed(database, guild.id)
     for channel_id, message_id in database.list_admin_panels(guild.id):
         channel = guild.get_channel(channel_id)
         if isinstance(channel, discord.TextChannel):
-            try:
-                message = await channel.fetch_message(message_id)
-                await message.edit(
-                    embed=build_admin_embed(database, guild.id),
-                    view=ConfigPanel(database),
-                )
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                continue
-    for farm_channel in database.list_farm_channels(guild.id):
+            tasks.append(
+                asyncio.create_task(_edit_admin_panel(channel, message_id, admin_embed, database))
+            )
+    farm_channels = database.list_farm_channels(guild.id)
+    if not refresh_all_farms:
+        farm_channels = [item for item in farm_channels if item.member_id == farm_member_id]
+    for farm_channel in farm_channels:
         if farm_channel.panel_message_id is None:
             continue
         channel = guild.get_channel(farm_channel.channel_id)
         if isinstance(channel, discord.TextChannel):
-            try:
-                message = await channel.fetch_message(farm_channel.panel_message_id)
-                await message.edit(
-                    embed=build_farm_embed(database, guild.id, farm_channel.member_id),
-                    view=FarmPanel(database),
+            tasks.append(
+                asyncio.create_task(
+                    _edit_farm_panel(
+                        channel,
+                        farm_channel.panel_message_id,
+                        build_farm_embed(database, guild.id, farm_channel.member_id),
+                        database,
+                    )
                 )
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                continue
+            )
+    if tasks:
+        await asyncio.gather(*tasks)
+
+
+async def _edit_admin_panel(
+    channel: discord.TextChannel,
+    message_id: int,
+    embed: discord.Embed,
+    database: Database,
+) -> None:
+    with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+        message = await channel.fetch_message(message_id)
+        await message.edit(embed=embed, view=ConfigPanel(database))
+
+
+async def _edit_farm_panel(
+    channel: discord.TextChannel,
+    message_id: int,
+    embed: discord.Embed,
+    database: Database,
+) -> None:
+    with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+        message = await channel.fetch_message(message_id)
+        await message.edit(embed=embed, view=FarmPanel(database))
+
+
+async def refresh_panels(
+    interaction: discord.Interaction,
+    database: Database,
+    *,
+    farm_member_id: int | None = None,
+    refresh_all_farms: bool = False,
+) -> None:
+    guild = interaction.guild
+    if guild is not None:
+        await refresh_guild_panels(
+            guild,
+            database,
+            farm_member_id=farm_member_id,
+            refresh_all_farms=refresh_all_farms,
+        )
 
 
 class ProductModal(discord.ui.Modal, title="Adicionar produto"):
@@ -155,11 +206,18 @@ class QuantityModal(discord.ui.Modal, title="Registrar produto coletado"):
         max_length=30,
     )
 
-    def __init__(self, database: Database, product: Product, member_id: int) -> None:
+    def __init__(
+        self,
+        database: Database,
+        product: Product,
+        member_id: int,
+        panel_message: discord.Message | None = None,
+    ) -> None:
         super().__init__()
         self.database = database
         self.product = product
         self.member_id = member_id
+        self.panel_message = panel_message
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.guild_id is None:
@@ -186,7 +244,7 @@ class QuantityModal(discord.ui.Modal, title="Registrar produto coletado"):
                     target_member = None
             target_is_admin = bool(target_member and target_member.guild_permissions.administrator)
         admin_registration = actor_is_admin and not target_is_admin
-        self.database.add_entry(
+        entry_id = self.database.add_entry(
             guild_id=interaction.guild_id,
             member_id=self.member_id,
             actor_id=interaction.user.id,
@@ -194,15 +252,49 @@ class QuantityModal(discord.ui.Modal, title="Registrar produto coletado"):
             product=self.product,
             quantity=quantity,
         )
-        await interaction.delete_original_response()
-        await refresh_panels(interaction, self.database)
+        with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+            await interaction.delete_original_response()
+        refresh: Awaitable[object]
+        if self.panel_message is not None:
+            refresh = asyncio.gather(
+                self.panel_message.edit(
+                    embed=build_farm_embed(self.database, interaction.guild_id, self.member_id),
+                    view=FarmPanel(self.database),
+                ),
+                refresh_panels(interaction, self.database),
+            )
+        else:
+            refresh = refresh_panels(interaction, self.database, farm_member_id=self.member_id)
+        if interaction.guild is not None:
+            await asyncio.gather(
+                send_entry_log(
+                    guild=interaction.guild,
+                    database=self.database,
+                    member_id=self.member_id,
+                    actor_id=interaction.user.id,
+                    actor_was_admin=admin_registration,
+                    product=self.product,
+                    quantity=quantity,
+                    entry_id=entry_id,
+                ),
+                refresh,
+            )
+        else:
+            await refresh
 
 
 class ProductSelect(discord.ui.Select["ProductSelectView"]):
-    def __init__(self, database: Database, products: list[Product], member_id: int) -> None:
+    def __init__(
+        self,
+        database: Database,
+        products: list[Product],
+        member_id: int,
+        panel_message: discord.Message | None = None,
+    ) -> None:
         self.database = database
         self.products = {str(product.id): product for product in products}
         self.member_id = member_id
+        self.panel_message = panel_message
         super().__init__(
             placeholder="Qual produto foi coletado?",
             options=[
@@ -212,15 +304,26 @@ class ProductSelect(discord.ui.Select["ProductSelectView"]):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(
-            QuantityModal(self.database, self.products[self.values[0]], self.member_id)
+            QuantityModal(
+                self.database,
+                self.products[self.values[0]],
+                self.member_id,
+                self.panel_message,
+            )
         )
         await _delete_temporary_message(interaction)
 
 
 class ProductSelectView(discord.ui.View):
-    def __init__(self, database: Database, products: list[Product], member_id: int) -> None:
+    def __init__(
+        self,
+        database: Database,
+        products: list[Product],
+        member_id: int,
+        panel_message: discord.Message | None = None,
+    ) -> None:
         super().__init__(timeout=120)
-        self.add_item(ProductSelect(database, products, member_id))
+        self.add_item(ProductSelect(database, products, member_id, panel_message))
 
 
 class PeriodReportModal(discord.ui.Modal, title="Consultar registros"):
@@ -286,6 +389,13 @@ class OutputQuantityModal(discord.ui.Modal, title="Registrar saída"):
         min_length=1,
         max_length=30,
     )
+    reason: discord.ui.TextInput[OutputQuantityModal] = discord.ui.TextInput(
+        label="Motivo da retirada",
+        placeholder="Ex.: Venda para cliente",
+        style=discord.TextStyle.paragraph,
+        min_length=1,
+        max_length=500,
+    )
 
     def __init__(self, database: Database, product: Product) -> None:
         super().__init__()
@@ -304,6 +414,7 @@ class OutputQuantityModal(discord.ui.Modal, title="Registrar saída"):
                 actor_id=interaction.user.id,
                 product=self.product,
                 quantity=quantity,
+                reason=str(self.reason),
             )
         except (InvalidOperation, ValueError) as exc:
             message = str(exc) or "Informe uma quantidade numérica maior que zero."
@@ -315,7 +426,22 @@ class OutputQuantityModal(discord.ui.Modal, title="Registrar saída"):
             ephemeral=True,
             delete_after=10,
         )
-        await refresh_panels(interaction, self.database)
+        refresh = refresh_panels(interaction, self.database)
+        if interaction.guild is not None:
+            await asyncio.gather(
+                send_output_log(
+                    guild=interaction.guild,
+                    database=self.database,
+                    actor_id=interaction.user.id,
+                    product=self.product,
+                    quantity=quantity,
+                    reason=str(self.reason),
+                    output_id=output_id,
+                ),
+                refresh,
+            )
+        else:
+            await refresh
 
 
 class OutputProductSelect(discord.ui.Select["OutputProductView"]):
@@ -397,13 +523,28 @@ class GoalTargetModal(discord.ui.Modal, title="Quantidade da meta"):
         self.database.set_goal_item(self.goal_id, self.product, target)
         await interaction.response.defer(ephemeral=True)
         if self.builder_message is not None:
-            await self.builder_message.edit(
-                content=(
-                    f"✅ **{format(target, 'f')} {self.product.name}** adicionado à meta. "
-                    "Selecione outro produto ou finalize."
+            try:
+                await self.builder_message.edit(
+                    content=(
+                        f"✅ **{format(target, 'f')} {self.product.name}** adicionado à meta. "
+                        "Selecione outro produto ou finalize."
+                    )
                 )
-            )
-        await interaction.delete_original_response()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                if interaction.guild_id is not None:
+                    await interaction.followup.send(
+                        "O menu anterior expirou e foi recriado. Selecione outro produto "
+                        "ou finalize a meta.",
+                        view=GoalBuilderView(
+                            self.database,
+                            interaction.guild_id,
+                            self.goal_id,
+                            self.database.list_products(interaction.guild_id),
+                        ),
+                        ephemeral=True,
+                    )
+        with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+            await interaction.delete_original_response()
 
 
 class GoalProductSelect(discord.ui.Select["GoalBuilderView"]):
@@ -454,7 +595,7 @@ class GoalBuilderView(discord.ui.View):
             return
         await interaction.response.defer(ephemeral=True)
         await _delete_temporary_message(interaction)
-        await refresh_panels(interaction, self.database)
+        await refresh_panels(interaction, self.database, refresh_all_farms=True)
 
 
 class GoalPeriodModal(discord.ui.Modal, title="Definir período da meta"):
@@ -491,6 +632,245 @@ class GoalPeriodModal(discord.ui.Modal, title="Definir período da meta"):
         )
 
 
+class EditGoalModal(discord.ui.Modal, title="Editar meta ativa"):
+    def __init__(self, database: Database, goal_id: int, start_at: str, end_at: str) -> None:
+        super().__init__()
+        self.database = database
+        self.goal_id = goal_id
+        start_text, end_text = display_period(start_at, end_at).split(" a ")
+        self.start_date: discord.ui.TextInput[EditGoalModal] = discord.ui.TextInput(
+            label="Data inicial",
+            placeholder="DD/MM/AAAA",
+            default=start_text,
+            min_length=10,
+            max_length=10,
+        )
+        self.end_date: discord.ui.TextInput[EditGoalModal] = discord.ui.TextInput(
+            label="Data final",
+            placeholder="DD/MM/AAAA",
+            default=end_text,
+            min_length=10,
+            max_length=10,
+        )
+        self.add_item(self.start_date)
+        self.add_item(self.end_date)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        try:
+            start_at, end_at = parse_period(str(self.start_date), str(self.end_date))
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True, delete_after=15)
+            return
+        self.database.update_goal_period(self.goal_id, start_at, end_at)
+        products = self.database.list_products(interaction.guild_id)
+        await interaction.response.send_message(
+            "Período atualizado. Selecione os produtos que deseja alterar e finalize.",
+            view=GoalBuilderView(self.database, interaction.guild_id, self.goal_id, products),
+            ephemeral=True,
+        )
+
+
+class CashTransactionModal(discord.ui.Modal):
+    def __init__(self, database: Database, kind: str) -> None:
+        title = "Entrada no caixa" if kind == "income" else "Saída do caixa"
+        super().__init__(title=title)
+        self.database = database
+        self.kind = kind
+        self.amount: discord.ui.TextInput[CashTransactionModal] = discord.ui.TextInput(
+            label="Valor em dólares",
+            placeholder="Ex.: 250000.00",
+            min_length=1,
+            max_length=30,
+        )
+        self.reason: discord.ui.TextInput[CashTransactionModal] = discord.ui.TextInput(
+            label="Motivo",
+            placeholder="Ex.: Venda de produtos",
+            style=discord.TextStyle.paragraph,
+            min_length=1,
+            max_length=500,
+        )
+        self.add_item(self.amount)
+        self.add_item(self.reason)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        try:
+            amount = Decimal(str(self.amount).strip().replace(",", "."))
+            transaction_id = self.database.add_cash_transaction(
+                guild_id=interaction.guild_id,
+                actor_id=interaction.user.id,
+                kind=self.kind,
+                amount=amount,
+                reason=str(self.reason),
+            )
+        except (InvalidOperation, ValueError) as exc:
+            await interaction.response.send_message(
+                str(exc) or "Informe um valor válido.", ephemeral=True, delete_after=15
+            )
+            return
+        balance = self.database.cash_balance(interaction.guild_id)
+        await interaction.response.send_message(
+            f"Movimentação `#{transaction_id}` registrada. Saldo: **{money(balance)}**",
+            ephemeral=True,
+            delete_after=15,
+        )
+        refresh = refresh_panels(interaction, self.database)
+        if interaction.guild is not None:
+            await asyncio.gather(
+                send_cash_log(
+                    guild=interaction.guild,
+                    database=self.database,
+                    title=("💰 Entrada no caixa" if self.kind == "income" else "💸 Saída do caixa"),
+                    amount=amount,
+                    reason=str(self.reason),
+                    actor_id=interaction.user.id,
+                    balance=balance,
+                    color=(discord.Color.green() if self.kind == "income" else discord.Color.red()),
+                ),
+                refresh,
+            )
+        else:
+            await refresh
+
+
+class ReserveRateModal(discord.ui.Modal, title="Configurar reserva da firma"):
+    percentage: discord.ui.TextInput[ReserveRateModal] = discord.ui.TextInput(
+        label="Percentual reservado",
+        placeholder="Ex.: 30",
+        min_length=1,
+        max_length=6,
+    )
+
+    def __init__(self, database: Database, current_rate: Decimal) -> None:
+        super().__init__()
+        self.database = database
+        self.percentage.default = format(current_rate * 100, "f")
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        try:
+            percentage = Decimal(str(self.percentage).strip().replace(",", "."))
+            self.database.set_reserve_rate(interaction.guild_id, percentage / 100)
+        except (InvalidOperation, ValueError) as exc:
+            await interaction.response.send_message(
+                str(exc) or "Informe um percentual válido.", ephemeral=True, delete_after=15
+            )
+            return
+        await interaction.response.send_message(
+            f"Reserva alterada para **{format(percentage, 'f')}%**.",
+            ephemeral=True,
+            delete_after=10,
+        )
+        await refresh_panels(interaction, self.database)
+
+
+def settlement_embed(preview: SettlementPreview) -> discord.Embed:
+    embed = discord.Embed(
+        title="Prévia do fechamento da meta",
+        description="Confira os valores antes de confirmar. Esta ação não poderá ser repetida.",
+        color=discord.Color.gold(),
+    )
+    embed.add_field(name="Caixa atual", value=money(preview.cash_before))
+    embed.add_field(
+        name="Reserva da firma",
+        value=f"{format(preview.reserve_rate * 100, 'f')}% — {money(preview.reserved_base)}",
+    )
+    embed.add_field(name="Base distribuível", value=money(preview.distributable))
+    lines = [
+        f"<@{item.member_id}> — **{format(item.progress * 100, '.1f')}%** — "
+        f"**{money(item.amount)}**"
+        for item in preview.payouts
+    ]
+    embed.add_field(name="Pagamentos", value="\n".join(lines)[:1024], inline=False)
+    embed.add_field(name="Total pago", value=money(preview.total_paid))
+    embed.add_field(name="Permanecerá no caixa", value=money(preview.retained))
+    return embed
+
+
+class SettlementConfirmView(discord.ui.View):
+    def __init__(self, database: Database, guild_id: int) -> None:
+        super().__init__(timeout=300)
+        self.database = database
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="Confirmar divisão", style=discord.ButtonStyle.green, emoji="💵")
+    async def confirm(
+        self, interaction: discord.Interaction, _: discord.ui.Button[SettlementConfirmView]
+    ) -> None:
+        if not await _require_admin(interaction) or interaction.guild is None:
+            return
+        guild = interaction.guild
+        try:
+            preview = build_settlement_preview(self.database, self.guild_id)
+            self.database.commit_goal_settlement(
+                guild_id=self.guild_id,
+                goal_id=preview.goal.id,
+                actor_id=interaction.user.id,
+                cash_before=preview.cash_before,
+                reserve_rate=preview.reserve_rate,
+                distributable=preview.distributable,
+                payouts=list(preview.payouts),
+            )
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True, delete_after=15)
+            return
+        await interaction.response.edit_message(
+            content=(
+                f"✅ Fechamento confirmado. **{money(preview.total_paid)}** pagos; "
+                f"**{money(preview.retained)}** permaneceram no caixa."
+            ),
+            embed=None,
+            view=None,
+        )
+
+        async def notify_payout(member_id: int, amount: Decimal, progress: Decimal) -> None:
+            farm_channel = self.database.get_farm_channel(self.guild_id, member_id)
+            if farm_channel is None:
+                return
+            channel = guild.get_channel(farm_channel.channel_id)
+            if isinstance(channel, discord.TextChannel):
+                with suppress(discord.Forbidden, discord.HTTPException):
+                    await channel.send(
+                        f"💵 **Fechamento da meta:** <@{member_id}> receberá "
+                        f"**{money(amount)}** pelo progresso de "
+                        f"**{format(progress * 100, '.1f')}%**."
+                    )
+
+        await asyncio.gather(
+            *(
+                notify_payout(item.member_id, item.amount, item.progress)
+                for item in preview.payouts
+            ),
+            send_cash_log(
+                guild=guild,
+                database=self.database,
+                title="💵 Fechamento da meta",
+                amount=preview.total_paid,
+                reason=(
+                    f"Meta #{preview.goal.id}; reserva de "
+                    f"{format(preview.reserve_rate * 100, 'f')}%"
+                ),
+                actor_id=interaction.user.id,
+                balance=preview.retained,
+                color=discord.Color.gold(),
+            ),
+            refresh_guild_panels(guild, self.database, refresh_all_farms=True),
+        )
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel(
+        self, interaction: discord.Interaction, _: discord.ui.Button[SettlementConfirmView]
+    ) -> None:
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        await _delete_temporary_message(interaction)
+
+
 class FarmPanel(discord.ui.View):
     def __init__(self, database: Database) -> None:
         super().__init__(timeout=None)
@@ -525,7 +905,12 @@ class FarmPanel(discord.ui.View):
             return
         await interaction.response.send_message(
             "Selecione o produto:",
-            view=ProductSelectView(self.database, products, farm_channel.member_id),
+            view=ProductSelectView(
+                self.database,
+                products,
+                farm_channel.member_id,
+                interaction.message,
+            ),
             ephemeral=True,
         )
 
@@ -635,6 +1020,77 @@ class MemberSelectView(discord.ui.View):
         self.add_item(MemberSelect(database))
 
 
+class DeleteFarmRoomSelect(discord.ui.Select["DeleteFarmRoomView"]):
+    def __init__(
+        self,
+        database: Database,
+        guild: discord.Guild,
+        farm_channels: list[FarmChannel],
+        member_names: dict[int, str],
+    ) -> None:
+        self.database = database
+        self.guild = guild
+        options = []
+        for farm_channel in farm_channels[:25]:
+            member_name = member_names.get(
+                farm_channel.member_id, f"Usuário {farm_channel.member_id}"
+            )
+            channel = guild.get_channel(farm_channel.channel_id)
+            channel_name = getattr(channel, "name", str(farm_channel.channel_id))
+            options.append(
+                discord.SelectOption(
+                    label=f"{member_name} — #{channel_name}"[:100],
+                    value=str(farm_channel.member_id),
+                    description=f"Pessoa: {member_name}"[:100],
+                )
+            )
+        super().__init__(
+            placeholder="Selecione a sala que será excluída",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction):
+            return
+        member_id = int(self.values[0])
+        farm_channel = self.database.get_farm_channel(self.guild.id, member_id)
+        if farm_channel is None:
+            await interaction.response.send_message(
+                "Essa sala não está mais cadastrada.", ephemeral=True, delete_after=10
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        channel = self.guild.get_channel(farm_channel.channel_id)
+        if channel is None:
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                fetched_channel = await self.guild.fetch_channel(farm_channel.channel_id)
+                await fetched_channel.delete(reason=f"Sala FARME excluída por {interaction.user}")
+        else:
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                await channel.delete(reason=f"Sala FARME excluída por {interaction.user}")
+        self.database.delete_farm_channel(farm_channel.channel_id)
+        await refresh_guild_panels(self.guild, self.database)
+        await _delete_temporary_message(interaction)
+        if self.view and self.view.source_message:
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                await self.view.source_message.delete()
+
+
+class DeleteFarmRoomView(discord.ui.View):
+    def __init__(
+        self,
+        database: Database,
+        guild: discord.Guild,
+        farm_channels: list[FarmChannel],
+        member_names: dict[int, str] | None = None,
+    ) -> None:
+        super().__init__(timeout=120)
+        self.source_message: discord.InteractionMessage | None = None
+        self.add_item(DeleteFarmRoomSelect(database, guild, farm_channels, member_names or {}))
+
+
 class ConfigPanel(discord.ui.View):
     def __init__(self, database: Database) -> None:
         super().__init__(timeout=None)
@@ -656,6 +1112,50 @@ class ConfigPanel(discord.ui.View):
             "Escolha a pessoa que terá acesso ao canal:",
             view=selection_view,
             ephemeral=True,
+        )
+        selection_view.source_message = await interaction.original_response()
+
+    @discord.ui.button(
+        label="Excluir sala FARME",
+        style=discord.ButtonStyle.danger,
+        emoji="🗑️",
+        custom_id="fdm:config:delete-channel",
+        row=0,
+    )
+    async def delete_channel(
+        self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
+    ) -> None:
+        if not await _require_admin(interaction) or interaction.guild is None:
+            return
+        guild = interaction.guild
+        farm_channels = self.database.list_farm_channels(guild.id)
+        if not farm_channels:
+            await interaction.response.send_message(
+                "Nenhuma sala FARME está cadastrada.", ephemeral=True, delete_after=10
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        async def resolve_member_name(farm_channel: FarmChannel) -> tuple[int, str]:
+            member = guild.get_member(farm_channel.member_id)
+            if member is None:
+                with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    member = await guild.fetch_member(farm_channel.member_id)
+            name = member.display_name if member else f"Usuário {farm_channel.member_id}"
+            return farm_channel.member_id, name
+
+        resolved_names = await asyncio.gather(
+            *(resolve_member_name(item) for item in farm_channels[:25])
+        )
+        selection_view = DeleteFarmRoomView(
+            self.database,
+            guild,
+            farm_channels,
+            dict(resolved_names),
+        )
+        await interaction.edit_original_response(
+            content="Escolha a sala FARME que deseja excluir:",
+            view=selection_view,
         )
         selection_view.source_message = await interaction.original_response()
 
@@ -779,10 +1279,84 @@ class ConfigPanel(discord.ui.View):
     ) -> None:
         if not await _require_admin(interaction) or interaction.guild_id is None:
             return
-        if not self.database.close_active_goal(interaction.guild_id):
+        try:
+            preview = build_settlement_preview(self.database, interaction.guild_id)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True, delete_after=15)
+            return
+        await interaction.response.send_message(
+            embed=settlement_embed(preview),
+            view=SettlementConfirmView(self.database, interaction.guild_id),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="Editar meta",
+        style=discord.ButtonStyle.secondary,
+        emoji="✏️",
+        custom_id="fdm:config:edit-goal",
+        row=2,
+    )
+    async def edit_goal(
+        self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
+    ) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        goal = self.database.get_active_goal(interaction.guild_id)
+        if goal is None:
             await interaction.response.send_message(
-                "Não existe uma meta ativa.", ephemeral=True, delete_after=10
+                "Não existe uma meta ativa para editar.", ephemeral=True, delete_after=10
             )
             return
-        await interaction.response.defer()
-        await refresh_panels(interaction, self.database)
+        await interaction.response.send_modal(
+            EditGoalModal(
+                self.database,
+                goal.id,
+                goal.start_at,
+                goal.end_at,
+            )
+        )
+
+    @discord.ui.button(
+        label="Entrada no caixa",
+        style=discord.ButtonStyle.green,
+        emoji="💰",
+        custom_id="fdm:config:cash-income",
+        row=3,
+    )
+    async def cash_income(
+        self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
+    ) -> None:
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.send_modal(CashTransactionModal(self.database, "income"))
+
+    @discord.ui.button(
+        label="Saída do caixa",
+        style=discord.ButtonStyle.danger,
+        emoji="💸",
+        custom_id="fdm:config:cash-expense",
+        row=3,
+    )
+    async def cash_expense(
+        self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
+    ) -> None:
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.send_modal(CashTransactionModal(self.database, "expense"))
+
+    @discord.ui.button(
+        label="Reserva da firma",
+        style=discord.ButtonStyle.secondary,
+        emoji="🏦",
+        custom_id="fdm:config:reserve-rate",
+        row=3,
+    )
+    async def reserve_rate(
+        self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
+    ) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        await interaction.response.send_modal(
+            ReserveRateModal(self.database, self.database.get_reserve_rate(interaction.guild_id))
+        )
