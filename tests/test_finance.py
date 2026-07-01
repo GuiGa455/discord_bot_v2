@@ -2,8 +2,8 @@ from decimal import Decimal
 
 import pytest
 
-from discord_bot_v2.database import Database
-from discord_bot_v2.finance import build_settlement_preview, money
+from discord_bot_v2.database import TIERED_BONUS_RULE, Database
+from discord_bot_v2.finance import build_settlement_preview, money, tier_factor
 
 
 def prepared_database(tmp_path) -> tuple[Database, int]:
@@ -68,6 +68,7 @@ def test_preview_and_commit_goal_settlement(tmp_path) -> None:
         cash_before=preview.cash_before,
         reserve_rate=preview.reserve_rate,
         distributable=preview.distributable,
+        distribution_rule=preview.distribution_rule,
         payouts=list(preview.payouts),
     )
 
@@ -82,6 +83,7 @@ def test_preview_and_commit_goal_settlement(tmp_path) -> None:
             cash_before=preview.cash_before,
             reserve_rate=preview.reserve_rate,
             distributable=preview.distributable,
+            distribution_rule=preview.distribution_rule,
             payouts=list(preview.payouts),
         )
 
@@ -115,3 +117,36 @@ def test_cash_expense_and_reserve_validation(tmp_path) -> None:
             amount=Decimal("61"),
             reason="Compra",
         )
+
+
+def test_tiered_rule_sends_penalties_only_to_full_achievers(tmp_path) -> None:
+    database, _ = prepared_database(tmp_path)
+    database.set_distribution_rule(1, TIERED_BONUS_RULE)
+
+    preview = build_settlement_preview(database, 1)
+
+    assert preview.distribution_rule == TIERED_BONUS_RULE
+    assert [item.amount for item in preview.payouts] == [
+        Decimal("1225000.00"),
+        Decimal("175000.00"),
+    ]
+    assert preview.total_paid == preview.distributable
+    assert preview.retained == preview.reserved_base
+
+
+@pytest.mark.parametrize(
+    ("progress", "expected"),
+    [
+        ("1.10", "1"),
+        ("1", "1"),
+        ("0.99", "0.95"),
+        ("0.94", "0.85"),
+        ("0.89", "0.70"),
+        ("0.79", "0.55"),
+        ("0.69", "0.40"),
+        ("0.59", "0.25"),
+        ("0.49", "0.10"),
+    ],
+)
+def test_tier_factor(progress: str, expected: str) -> None:
+    assert tier_factor(Decimal(progress)) == Decimal(expected)

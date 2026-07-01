@@ -13,7 +13,14 @@ from decimal import Decimal, InvalidOperation
 import discord
 
 from discord_bot_v2.audit import send_cash_log, send_entry_log, send_output_log
-from discord_bot_v2.database import Database, FarmChannel, Product
+from discord_bot_v2.database import (
+    PROPORTIONAL_RULE,
+    TIERED_BONUS_RULE,
+    Database,
+    FarmChannel,
+    Product,
+    distribution_rule_name,
+)
 from discord_bot_v2.finance import SettlementPreview, build_settlement_preview, money
 from discord_bot_v2.reporting import (
     build_admin_embed,
@@ -780,6 +787,11 @@ def settlement_embed(preview: SettlementPreview) -> discord.Embed:
         value=f"{format(preview.reserve_rate * 100, 'f')}% — {money(preview.reserved_base)}",
     )
     embed.add_field(name="Base distribuível", value=money(preview.distributable))
+    embed.add_field(
+        name="Regra de distribuição",
+        value=distribution_rule_name(preview.distribution_rule),
+        inline=False,
+    )
     lines = [
         f"<@{item.member_id}> — **{format(item.progress * 100, '.1f')}%** — "
         f"**{money(item.amount)}**"
@@ -813,6 +825,7 @@ class SettlementConfirmView(discord.ui.View):
                 cash_before=preview.cash_before,
                 reserve_rate=preview.reserve_rate,
                 distributable=preview.distributable,
+                distribution_rule=preview.distribution_rule,
                 payouts=list(preview.payouts),
             )
         except ValueError as exc:
@@ -1091,6 +1104,48 @@ class DeleteFarmRoomView(discord.ui.View):
         self.add_item(DeleteFarmRoomSelect(database, guild, farm_channels, member_names or {}))
 
 
+class DistributionRuleSelect(discord.ui.Select["DistributionRuleView"]):
+    def __init__(self, database: Database, current_rule: str) -> None:
+        self.database = database
+        options = [
+            discord.SelectOption(
+                label="Proporcional ao progresso (regra atual)",
+                value=PROPORTIONAL_RULE,
+                description="Cada pessoa recebe a porcentagem exata alcançada.",
+                default=current_rule == PROPORTIONAL_RULE,
+            ),
+            discord.SelectOption(
+                label="Faixas + bônus aos 100%",
+                value=TIERED_BONUS_RULE,
+                description="Penalidades vão somente para quem cumpriu toda a meta.",
+                default=current_rule == TIERED_BONUS_RULE,
+            ),
+        ]
+        super().__init__(
+            placeholder="Selecione a regra de distribuição",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        rule = self.values[0]
+        self.database.set_distribution_rule(interaction.guild_id, rule)
+        await interaction.response.edit_message(
+            content=f"✅ Regra vigente: **{distribution_rule_name(rule)}**.",
+            view=None,
+        )
+        await refresh_panels(interaction, self.database)
+
+
+class DistributionRuleView(discord.ui.View):
+    def __init__(self, database: Database, current_rule: str) -> None:
+        super().__init__(timeout=120)
+        self.add_item(DistributionRuleSelect(database, current_rule))
+
+
 class ConfigPanel(discord.ui.View):
     def __init__(self, database: Database) -> None:
         super().__init__(timeout=None)
@@ -1359,4 +1414,24 @@ class ConfigPanel(discord.ui.View):
             return
         await interaction.response.send_modal(
             ReserveRateModal(self.database, self.database.get_reserve_rate(interaction.guild_id))
+        )
+
+    @discord.ui.button(
+        label="Regra de divisão",
+        style=discord.ButtonStyle.secondary,
+        emoji="⚖️",
+        custom_id="fdm:config:distribution-rule",
+        row=3,
+    )
+    async def distribution_rule(
+        self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
+    ) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        current_rule = self.database.get_distribution_rule(interaction.guild_id)
+        await interaction.response.send_message(
+            f"Regra vigente: **{distribution_rule_name(current_rule)}**.\n"
+            "Escolha a regra aplicada ao próximo fechamento:",
+            view=DistributionRuleView(self.database, current_rule),
+            ephemeral=True,
         )

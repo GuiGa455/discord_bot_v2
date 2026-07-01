@@ -102,11 +102,17 @@ de participar da meta ativa. O histórico de coletas permanece preservado no SQL
 
 O painel administrativo possui controles para **Entrada no caixa**, **Saída do caixa** e
 **Reserva da firma**. A moeda padrão é dólar (`USD`) e a reserva inicial é 30%.
+O botão **Regra de divisão** permite alternar entre:
+
+- **Proporcional ao progresso**: regra original, na qual a cota é multiplicada pelo
+  percentual geral alcançado e o restante permanece no caixa.
+- **Faixas + bônus aos 100%**: aplica fatores de 100%, 95%, 85%, 70%, 55%, 40%, 25%
+  ou 10%. A sobra das penalidades é dividida somente entre quem bateu 100%; caso ninguém
+  cumpra toda a meta, a sobra permanece no caixa.
 
 Ao clicar em **Encerrar meta**, o bot apresenta uma prévia antes da confirmação. Somente
-pessoas com sala ativa e alguma coleta no período participam. A parcela integral é o valor
-distribuível dividido pelo número de participantes; cada pagamento é essa parcela multiplicada
-pelo progresso geral da pessoa. A quantia não conquistada permanece no caixa.
+pessoas com sala ativa e alguma coleta no período participam. A prévia identifica a regra
+vigente e mostra quanto cada participante receberá antes da confirmação.
 
 Depois da confirmação, o fechamento não pode ser executado novamente para a mesma meta,
 o caixa é atualizado e cada sala FARME recebe uma mensagem com o pagamento registrado.

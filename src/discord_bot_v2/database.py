@@ -10,6 +10,16 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+PROPORTIONAL_RULE = "proportional"
+TIERED_BONUS_RULE = "tiered_bonus"
+DISTRIBUTION_RULES = frozenset({PROPORTIONAL_RULE, TIERED_BONUS_RULE})
+
+
+def distribution_rule_name(rule: str) -> str:
+    if rule == TIERED_BONUS_RULE:
+        return "Faixas + bônus para quem bateu 100%"
+    return "Proporcional ao progresso"
+
 
 @dataclass(frozen=True, slots=True)
 class Product:
@@ -149,6 +159,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS financial_settings (
                     guild_id INTEGER PRIMARY KEY,
                     reserve_rate TEXT NOT NULL DEFAULT '0.30',
+                    distribution_rule TEXT NOT NULL DEFAULT 'proportional',
                     updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS cash_log_channels (
@@ -176,6 +187,7 @@ class Database:
                     total_paid TEXT NOT NULL,
                     retained TEXT NOT NULL,
                     participant_count INTEGER NOT NULL,
+                    distribution_rule TEXT NOT NULL DEFAULT 'proportional',
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (goal_id) REFERENCES goals(id)
                 );
@@ -204,6 +216,28 @@ class Database:
             if "reason" not in output_columns:
                 connection.execute(
                     "ALTER TABLE stock_outputs ADD COLUMN reason TEXT NOT NULL DEFAULT ''"
+                )
+            financial_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(financial_settings)"
+                ).fetchall()
+            }
+            if "distribution_rule" not in financial_columns:
+                connection.execute(
+                    "ALTER TABLE financial_settings ADD COLUMN distribution_rule "
+                    "TEXT NOT NULL DEFAULT 'proportional'"
+                )
+            settlement_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(goal_settlements)"
+                ).fetchall()
+            }
+            if "distribution_rule" not in settlement_columns:
+                connection.execute(
+                    "ALTER TABLE goal_settlements ADD COLUMN distribution_rule "
+                    "TEXT NOT NULL DEFAULT 'proportional'"
                 )
 
     def list_products(self, guild_id: int) -> list[Product]:
@@ -560,6 +594,27 @@ class Database:
             ).fetchone()
         return Decimal(row["reserve_rate"]) if row else Decimal("0.30")
 
+    def get_distribution_rule(self, guild_id: int) -> str:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT distribution_rule FROM financial_settings WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+        return str(row["distribution_rule"]) if row else PROPORTIONAL_RULE
+
+    def set_distribution_rule(self, guild_id: int, rule: str) -> None:
+        if rule not in DISTRIBUTION_RULES:
+            raise ValueError("Regra de distribuição inválida")
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO financial_settings (guild_id, distribution_rule, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT (guild_id) DO UPDATE SET
+                    distribution_rule = excluded.distribution_rule,
+                    updated_at = excluded.updated_at""",
+                (guild_id, rule, datetime.now(UTC).isoformat()),
+            )
+
     def set_cash_log_channel(self, guild_id: int, channel_id: int) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -656,8 +711,11 @@ class Database:
         cash_before: Decimal,
         reserve_rate: Decimal,
         distributable: Decimal,
+        distribution_rule: str,
         payouts: list[CashPayout],
     ) -> None:
+        if distribution_rule not in DISTRIBUTION_RULES:
+            raise ValueError("Regra de distribuição inválida")
         total_paid = sum((item.amount for item in payouts), Decimal(0))
         retained = cash_before - total_paid
         now = datetime.now(UTC).isoformat()
@@ -670,8 +728,8 @@ class Database:
             connection.execute(
                 """INSERT INTO goal_settlements (
                     goal_id, guild_id, cash_before, reserve_rate, distributable,
-                    total_paid, retained, participant_count, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    total_paid, retained, participant_count, distribution_rule, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     goal_id,
                     guild_id,
@@ -681,6 +739,7 @@ class Database:
                     format(total_paid, "f"),
                     format(retained, "f"),
                     len(payouts),
+                    distribution_rule,
                     now,
                 ),
             )

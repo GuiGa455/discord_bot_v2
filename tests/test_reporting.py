@@ -54,3 +54,4 @@ def test_build_panel_embeds(tmp_path) -> None:
 
     assert "✅" in farm_embed.fields[0].value
     assert "100.0%" in admin_embed.fields[3].value
+    assert "Proporcional ao progresso" in admin_embed.fields[2].value

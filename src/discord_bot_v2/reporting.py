@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import discord
 
-from discord_bot_v2.database import Database, GoalProgress
+from discord_bot_v2.database import Database, GoalProgress, distribution_rule_name
 
 LOCAL_TIMEZONE = ZoneInfo("America/Sao_Paulo")
 
@@ -115,11 +115,13 @@ def build_admin_embed(database: Database, guild_id: int) -> discord.Embed:
         inline=False,
     )
     reserve_rate = database.get_reserve_rate(guild_id)
+    distribution_rule = distribution_rule_name(database.get_distribution_rule(guild_id))
     embed.add_field(
         name="Caixa da firma",
         value=(
             f"**Saldo:** {format_usd(database.cash_balance(guild_id))}\n"
-            f"**Reserva:** {format(reserve_rate * 100, 'f')}%"
+            f"**Reserva:** {format(reserve_rate * 100, 'f')}%\n"
+            f"**Regra de divisão:** {distribution_rule}"
         ),
         inline=False,
     )
