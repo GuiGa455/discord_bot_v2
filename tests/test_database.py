@@ -25,9 +25,11 @@ def test_database_stores_products_channels_and_entries(tmp_path) -> None:
     assert database.get_farm_channel(1, 10).channel_id == 100
     assert database.get_farm_channel_by_channel(100).member_id == 10
     assert entry_id == 1
+    with pytest.raises(ValueError, match="Tipo de produto"):
+        database.list_products(1, kind="outro")
 
 
-def test_database_removes_product_without_losing_entry_history(tmp_path) -> None:
+def test_database_removes_product_and_its_stock_history(tmp_path) -> None:
     database = Database(str(tmp_path / "bot.db"))
     database.initialize()
     product = database.add_product(1, "Madeira")
@@ -42,6 +44,9 @@ def test_database_removes_product_without_losing_entry_history(tmp_path) -> None
 
     assert database.remove_product(1, product.id) is True
     assert database.list_products(1) == []
+    assert database.product_totals(1) == {}
+    assert database.stock_totals(1) == {}
+    assert database.remove_product(1, product.id) is False
 
 
 def test_removing_product_also_removes_it_from_active_goal(tmp_path) -> None:

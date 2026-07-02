@@ -133,6 +133,11 @@ recebem estoque manualmente pelo menu administrativo e não aparecem no fluxo de
 O botão **Registrar venda** valida o estoque, registra a saída e adiciona o total ao caixa em
 uma única transação. Alterações futuras no preço não mudam vendas antigas.
 
+O botão **Cadastrar produto** pergunta primeiro se o item é de FARME ou VENDA. O botão
+**Entrada / saída estoque** aceita qualquer produto e pergunta qual movimentação será feita.
+Ao remover um produto, suas coletas e movimentações de estoque deixam de compor os totais;
+vendas e movimentações financeiras já concluídas permanecem preservadas.
+
 O painel mantém acesso direto às ações, organizado por linhas: salas e consultas;
 produtos e estoque; metas; caixa; vendas e administração. Assim as operações mais usadas
 continuam a um clique sem misturar assuntos na mesma linha.

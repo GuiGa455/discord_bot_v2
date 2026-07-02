@@ -222,6 +222,44 @@ class SaleProductModal(discord.ui.Modal, title="Cadastrar produto de venda"):
         )
 
 
+class ProductKindSelect(discord.ui.Select["ProductKindView"]):
+    def __init__(self, database: Database) -> None:
+        self.database = database
+        super().__init__(
+            placeholder="Qual será o tipo do produto?",
+            options=[
+                discord.SelectOption(
+                    label="Produto de FARME",
+                    value="farm",
+                    description="Aparece nas metas e nas salas de coleta.",
+                    emoji="📦",
+                ),
+                discord.SelectOption(
+                    label="Produto de VENDA",
+                    value="sale",
+                    description="Possui preço e não aparece nas metas.",
+                    emoji="🏷️",
+                ),
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction):
+            return
+        modal: discord.ui.Modal = (
+            ProductModal(self.database)
+            if self.values[0] == "farm"
+            else SaleProductModal(self.database)
+        )
+        await interaction.response.send_modal(modal)
+
+
+class ProductKindView(discord.ui.View):
+    def __init__(self, database: Database) -> None:
+        super().__init__(timeout=120)
+        self.add_item(ProductKindSelect(database))
+
+
 class RemoveProductSelect(discord.ui.Select["RemoveProductView"]):
     def __init__(self, database: Database, products: list[Product]) -> None:
         self.database = database
@@ -1346,7 +1384,7 @@ class SaleProductView(discord.ui.View):
         self.add_item(SaleProductSelect(database, products))
 
 
-class SaleStockInputModal(discord.ui.Modal, title="Adicionar estoque de venda"):
+class SaleStockInputModal(discord.ui.Modal, title="Entrada de estoque"):
     quantity: discord.ui.TextInput[SaleStockInputModal] = discord.ui.TextInput(
         label="Quantidade adicionada", placeholder="Ex.: 10", min_length=1, max_length=30
     )
@@ -1383,7 +1421,7 @@ class SaleStockInputSelect(discord.ui.Select["SaleStockInputView"]):
         self.database = database
         self.products = {str(product.id): product for product in products}
         super().__init__(
-            placeholder="Selecione o produto de venda",
+            placeholder="Selecione o produto",
             options=[
                 discord.SelectOption(label=product.name, value=str(product.id))
                 for product in products
@@ -1402,6 +1440,42 @@ class SaleStockInputView(discord.ui.View):
     def __init__(self, database: Database, products: list[Product]) -> None:
         super().__init__(timeout=120)
         self.add_item(SaleStockInputSelect(database, products))
+
+
+class StockMovementSelect(discord.ui.Select["StockMovementView"]):
+    def __init__(self, database: Database) -> None:
+        self.database = database
+        super().__init__(
+            placeholder="Selecione o tipo de movimentação",
+            options=[
+                discord.SelectOption(label="Entrada de estoque", value="input", emoji="📥"),
+                discord.SelectOption(label="Saída de estoque", value="output", emoji="📤"),
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        products = self.database.list_products(interaction.guild_id)
+        if not products:
+            await interaction.response.send_message(
+                "A lista de produtos está vazia.", ephemeral=True, delete_after=10
+            )
+            return
+        view: discord.ui.View = (
+            SaleStockInputView(self.database, products)
+            if self.values[0] == "input"
+            else OutputProductView(self.database, products)
+        )
+        await interaction.response.send_message(
+            "Selecione o produto:", view=view, ephemeral=True
+        )
+
+
+class StockMovementView(discord.ui.View):
+    def __init__(self, database: Database) -> None:
+        super().__init__(timeout=120)
+        self.add_item(StockMovementSelect(database))
 
 
 class SalesPeriodSelect(discord.ui.Select["SalesReportView"]):
@@ -1756,6 +1830,13 @@ class ConfigPanel(discord.ui.View):
     def __init__(self, database: Database) -> None:
         super().__init__(timeout=None)
         self.database = database
+        hidden_ids = {
+            "fdm:config:add-sale-product",
+            "fdm:config:add-sale-stock",
+        }
+        for item in list(self.children):
+            if getattr(item, "custom_id", None) in hidden_ids:
+                self.remove_item(item)
 
     @discord.ui.button(
         label="Criar sala FARME",
@@ -1822,7 +1903,7 @@ class ConfigPanel(discord.ui.View):
         selection_view.source_message = await interaction.original_response()
 
     @discord.ui.button(
-        label="Produto FARME",
+        label="Cadastrar produto",
         style=discord.ButtonStyle.green,
         emoji="➕",
         custom_id="fdm:config:add-product",
@@ -1833,7 +1914,11 @@ class ConfigPanel(discord.ui.View):
     ) -> None:
         if not await _require_admin(interaction):
             return
-        await interaction.response.send_modal(ProductModal(self.database))
+        await interaction.response.send_message(
+            "Escolha como o produto será utilizado:",
+            view=ProductKindView(self.database),
+            ephemeral=True,
+        )
 
     @discord.ui.button(
         label="Produto VENDA",
@@ -1898,7 +1983,7 @@ class ConfigPanel(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="Saída de estoque",
+        label="Entrada / saída estoque",
         style=discord.ButtonStyle.secondary,
         emoji="📤",
         custom_id="fdm:config:output",
@@ -1909,15 +1994,9 @@ class ConfigPanel(discord.ui.View):
     ) -> None:
         if not await _require_admin(interaction) or interaction.guild_id is None:
             return
-        products = self.database.list_products(interaction.guild_id)
-        if not products:
-            await interaction.response.send_message(
-                "A lista de produtos está vazia.", ephemeral=True
-            )
-            return
         await interaction.response.send_message(
-            "Selecione o produto retirado:",
-            view=OutputProductView(self.database, products),
+            "Escolha o tipo de movimentação:",
+            view=StockMovementView(self.database),
             ephemeral=True,
         )
 

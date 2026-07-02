@@ -378,6 +378,13 @@ class Database:
     def remove_product(self, guild_id: int, product_id: int) -> bool:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            product_row = connection.execute(
+                "SELECT name FROM products WHERE guild_id = ? AND id = ?",
+                (guild_id, product_id),
+            ).fetchone()
+            if product_row is None:
+                return False
+            product_name = str(product_row["name"])
             goal_rows = connection.execute(
                 "SELECT goal_id FROM goal_items WHERE product_id = ?", (product_id,)
             ).fetchall()
@@ -391,6 +398,18 @@ class Database:
                         "UPDATE goals SET status = 'closed' WHERE id = ? AND status = 'active'",
                         (row["goal_id"],),
                     )
+            connection.execute(
+                "DELETE FROM farm_entries WHERE guild_id = ? AND product_name = ?",
+                (guild_id, product_name),
+            )
+            connection.execute(
+                "DELETE FROM stock_inputs WHERE guild_id = ? AND product_name = ?",
+                (guild_id, product_name),
+            )
+            connection.execute(
+                "DELETE FROM stock_outputs WHERE guild_id = ? AND product_name = ?",
+                (guild_id, product_name),
+            )
             cursor = connection.execute(
                 "DELETE FROM products WHERE guild_id = ? AND id = ?",
                 (guild_id, product_id),
@@ -726,8 +745,6 @@ class Database:
     def add_stock_input(
         self, *, guild_id: int, actor_id: int, product: Product, quantity: Decimal
     ) -> int:
-        if product.kind != "sale":
-            raise ValueError("A entrada manual é exclusiva para produtos de venda")
         if quantity <= 0:
             raise ValueError("A quantidade deve ser maior que zero")
         with self._connect() as connection:
