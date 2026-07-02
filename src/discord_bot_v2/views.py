@@ -1569,7 +1569,7 @@ MENU_OPTIONS: dict[str, list[discord.SelectOption]] = {
 }
 
 
-class AdminCategorySelect(discord.ui.Select["AdminCategoryView"]):
+class AdminCategorySelect(discord.ui.Select["AdminCategoryView"]):  # pragma: no cover
     def __init__(self, database: Database, category: str) -> None:
         self.database = database
         super().__init__(placeholder="Escolha uma ação", options=MENU_OPTIONS[category])
@@ -1725,13 +1725,13 @@ class AdminCategorySelect(discord.ui.Select["AdminCategoryView"]):
         )
 
 
-class AdminCategoryView(discord.ui.View):
+class AdminCategoryView(discord.ui.View):  # pragma: no cover
     def __init__(self, database: Database, category: str) -> None:
         super().__init__(timeout=180)
         self.add_item(AdminCategorySelect(database, category))
 
 
-class AdminCategoryButton(discord.ui.Button["ConfigPanel"]):
+class AdminCategoryButton(discord.ui.Button["ConfigPanel"]):  # pragma: no cover
     def __init__(self, database: Database, category: str, label: str, emoji: str) -> None:
         super().__init__(
             label=label,
@@ -1752,22 +1752,17 @@ class AdminCategoryButton(discord.ui.Button["ConfigPanel"]):
         )
 
 
-class _LegacyConfigPanel(discord.ui.View):  # pragma: no cover
+class ConfigPanel(discord.ui.View):
     def __init__(self, database: Database) -> None:
         super().__init__(timeout=None)
         self.database = database
-        self.clear_items()
-        self.add_item(AdminCategoryButton(database, "rooms", "Salas FARME", "🔐"))
-        self.add_item(AdminCategoryButton(database, "products", "Produtos / Estoque", "📦"))
-        self.add_item(AdminCategoryButton(database, "goals", "Metas", "🎯"))
-        self.add_item(AdminCategoryButton(database, "finance", "Financeiro / Vendas", "💰"))
-        self.add_item(AdminCategoryButton(database, "admin", "Administração", "⚙️"))
 
     @discord.ui.button(
         label="Criar sala FARME",
         style=discord.ButtonStyle.primary,
         emoji="🔒",
         custom_id="fdm:config:create-channel",
+        row=0,
     )
     async def create_channel(
         self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
@@ -1827,10 +1822,11 @@ class _LegacyConfigPanel(discord.ui.View):  # pragma: no cover
         selection_view.source_message = await interaction.original_response()
 
     @discord.ui.button(
-        label="Adicionar produto",
+        label="Produto FARME",
         style=discord.ButtonStyle.green,
         emoji="➕",
         custom_id="fdm:config:add-product",
+        row=1,
     )
     async def add_product(
         self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
@@ -1840,10 +1836,49 @@ class _LegacyConfigPanel(discord.ui.View):  # pragma: no cover
         await interaction.response.send_modal(ProductModal(self.database))
 
     @discord.ui.button(
+        label="Produto VENDA",
+        style=discord.ButtonStyle.green,
+        emoji="🏷️",
+        custom_id="fdm:config:add-sale-product",
+        row=1,
+    )
+    async def add_sale_product(
+        self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
+    ) -> None:
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.send_modal(SaleProductModal(self.database))
+
+    @discord.ui.button(
+        label="Estoque VENDA",
+        style=discord.ButtonStyle.green,
+        emoji="📥",
+        custom_id="fdm:config:add-sale-stock",
+        row=1,
+    )
+    async def add_sale_stock(
+        self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
+    ) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        products = self.database.list_products(interaction.guild_id, kind="sale")
+        if not products:
+            await interaction.response.send_message(
+                "Nenhum produto de venda foi cadastrado.", ephemeral=True, delete_after=10
+            )
+            return
+        await interaction.response.send_message(
+            "Selecione o produto que entrou no estoque:",
+            view=SaleStockInputView(self.database, products),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
         label="Remover produto",
         style=discord.ButtonStyle.red,
         emoji="➖",
         custom_id="fdm:config:remove-product",
+        row=1,
     )
     async def remove_product(
         self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
@@ -1891,7 +1926,7 @@ class _LegacyConfigPanel(discord.ui.View):  # pragma: no cover
         style=discord.ButtonStyle.secondary,
         emoji="🔎",
         custom_id="fdm:config:member-report",
-        row=1,
+        row=0,
     )
     async def member_report(
         self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
@@ -1923,7 +1958,7 @@ class _LegacyConfigPanel(discord.ui.View):  # pragma: no cover
         style=discord.ButtonStyle.secondary,
         emoji="🔄",
         custom_id="fdm:config:refresh",
-        row=1,
+        row=0,
     )
     async def refresh(
         self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
@@ -2033,7 +2068,7 @@ class _LegacyConfigPanel(discord.ui.View):  # pragma: no cover
         style=discord.ButtonStyle.secondary,
         emoji="⚖️",
         custom_id="fdm:config:distribution-rule",
-        row=3,
+        row=2,
     )
     async def distribution_rule(
         self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
@@ -2139,7 +2174,7 @@ class _LegacyConfigPanel(discord.ui.View):  # pragma: no cover
         )
 
 
-class ConfigPanel(discord.ui.View):
+class _CompactConfigPanel(discord.ui.View):  # pragma: no cover
     """Compact persistent administrative menu grouped by business area."""
 
     def __init__(self, database: Database) -> None:

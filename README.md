@@ -133,9 +133,9 @@ recebem estoque manualmente pelo menu administrativo e não aparecem no fluxo de
 O botão **Registrar venda** valida o estoque, registra a saída e adiciona o total ao caixa em
 uma única transação. Alterações futuras no preço não mudam vendas antigas.
 
-O painel principal possui somente cinco áreas: **Salas FARME**, **Produtos / Estoque**,
-**Metas**, **Financeiro / Vendas** e **Administração**. Cada botão abre um menu privado com
-as ações relacionadas.
+O painel mantém acesso direto às ações, organizado por linhas: salas e consultas;
+produtos e estoque; metas; caixa; vendas e administração. Assim as operações mais usadas
+continuam a um clique sem misturar assuntos na mesma linha.
 
 O painel separa o saldo real do caixa do total vendido na semana atual. Em **Relatório de
 vendas**, administradores podem consultar o dia, a semana ou o mês atual, com totais por

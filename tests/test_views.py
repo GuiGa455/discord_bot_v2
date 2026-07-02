@@ -116,17 +116,15 @@ async def test_sale_product_and_stock_input_modals(database: Database) -> None:
     assert database.stock_totals(1)["Pistola"] == Decimal("10")
 
 
-def test_compact_admin_panel_has_five_categories(database: Database) -> None:
+def test_admin_panel_groups_direct_actions_by_row(database: Database) -> None:
     panel = ConfigPanel(database)
 
-    assert len(panel.children) == 5
-    assert {getattr(child, "label", None) for child in panel.children} == {
-        "Salas FARME",
-        "Produtos / Estoque",
-        "Metas",
-        "Financeiro / Vendas",
-        "Administração",
-    }
+    assert len(panel.children) == 20
+    rows: dict[int | None, int] = {}
+    for child in panel.children:
+        row = getattr(child, "row", None)
+        rows[row] = rows.get(row, 0) + 1
+    assert rows == {0: 4, 1: 5, 2: 4, 3: 3, 4: 4}
 
 
 @pytest.mark.asyncio
