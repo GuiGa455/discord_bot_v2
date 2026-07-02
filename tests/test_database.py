@@ -179,6 +179,7 @@ def test_goal_progress_and_panel_locations(tmp_path) -> None:
     database.activate_goal(1, goal.id)
     database.save_farm_channel(1, 10, 100, 1000)
     database.save_admin_panel(1, 200, 2000)
+    database.save_admin_panel(1, 201, 2001)
     database.add_entry(
         guild_id=1,
         member_id=10,
@@ -195,7 +196,7 @@ def test_goal_progress_and_panel_locations(tmp_path) -> None:
     assert progress[0].target == Decimal("100")
     assert progress[0].current == Decimal("40")
     assert database.list_farm_channels(1)[0].panel_message_id == 1000
-    assert database.list_admin_panels(1) == [(200, 2000)]
+    assert database.list_admin_panels(1) == [(201, 2001)]
 
 
 def test_goal_requires_an_item(tmp_path) -> None:

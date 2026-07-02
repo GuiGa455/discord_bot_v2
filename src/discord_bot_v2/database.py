@@ -301,6 +301,12 @@ class Database:
                     "ALTER TABLE goal_settlements ADD COLUMN distribution_rule "
                     "TEXT NOT NULL DEFAULT 'proportional'"
                 )
+            connection.execute(
+                """DELETE FROM admin_panels
+                WHERE rowid NOT IN (
+                    SELECT MAX(rowid) FROM admin_panels GROUP BY guild_id
+                )"""
+            )
 
     def list_products(self, guild_id: int, *, kind: str | None = None) -> list[Product]:
         if kind not in {None, "farm", "sale"}:
@@ -912,8 +918,9 @@ class Database:
 
     def save_admin_panel(self, guild_id: int, channel_id: int, message_id: int) -> None:
         with self._connect() as connection:
+            connection.execute("DELETE FROM admin_panels WHERE guild_id = ?", (guild_id,))
             connection.execute(
-                """INSERT OR REPLACE INTO admin_panels (guild_id, channel_id, message_id)
+                """INSERT INTO admin_panels (guild_id, channel_id, message_id)
                 VALUES (?, ?, ?)""",
                 (guild_id, channel_id, message_id),
             )
@@ -921,7 +928,8 @@ class Database:
     def list_admin_panels(self, guild_id: int) -> list[tuple[int, int]]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT channel_id, message_id FROM admin_panels WHERE guild_id = ?",
+                """SELECT channel_id, message_id FROM admin_panels
+                WHERE guild_id = ? ORDER BY rowid DESC LIMIT 1""",
                 (guild_id,),
             ).fetchall()
         return [(row["channel_id"], row["message_id"]) for row in rows]
