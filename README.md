@@ -151,7 +151,8 @@ vendas antigas mantêm o nome e os valores históricos.
 
 ### Consulta e reset do banco
 
-O botão **Dados / reset** mostra um resumo das tabelas do servidor. O reset preserva
+O comando privado `/dados_reset_fdm` mostra um resumo das tabelas do servidor e só pode
+ser aberto pelo proprietário da aplicação registrado no Discord Developer Portal. O reset preserva
 produtos, preços, salas FARME, painéis, canais de log e configurações, mas apaga coletas,
 estoque, metas, vendas e movimentações do caixa. Para executá-lo é necessário ser
 administrador, possuir o cargo específico configurado no seletor e digitar a confirmação

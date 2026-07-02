@@ -40,6 +40,37 @@ async def test_slash_oi_replies_to_interaction() -> None:
     interaction.response.send_message.assert_awaited_once_with("Olá! 👋")
 
 
+@pytest.mark.asyncio
+async def test_database_tools_are_restricted_to_application_owner() -> None:
+    bot = create_bot(Settings("token"))
+    application = Mock(owner=Mock(id=10))
+    interaction = Mock()
+    interaction.user = Mock(id=20)
+    interaction.guild_id = 1
+    interaction.response.send_message = AsyncMock()
+
+    with patch.object(bot, "application_info", AsyncMock(return_value=application)):
+        await bot.dados_reset_fdm(interaction)
+
+    assert "Somente" in interaction.response.send_message.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_application_owner_can_open_database_tools() -> None:
+    bot = create_bot(Settings("token"))
+    application = Mock(owner=Mock(id=10))
+    interaction = Mock()
+    interaction.user = Mock(id=10)
+    interaction.guild_id = 1
+    interaction.response.send_message = AsyncMock()
+
+    with patch.object(bot, "application_info", AsyncMock(return_value=application)):
+        await bot.dados_reset_fdm(interaction)
+
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+    assert "view" in interaction.response.send_message.await_args.kwargs
+
+
 def test_run_starts_client_with_token() -> None:
     settings = Settings("secret")
     client = Mock(spec=DiscordBot)

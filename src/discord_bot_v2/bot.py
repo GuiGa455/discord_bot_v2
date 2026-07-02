@@ -11,7 +11,7 @@ from discord_bot_v2.config import Settings
 from discord_bot_v2.database import Database
 from discord_bot_v2.logging_config import configure_logging
 from discord_bot_v2.reporting import build_admin_embed, build_farm_embed
-from discord_bot_v2.views import ConfigPanel, FarmPanel, refresh_guild_panels
+from discord_bot_v2.views import ConfigPanel, DataToolsView, FarmPanel, refresh_guild_panels
 
 LOGGER = logging.getLogger(__name__)
 
@@ -39,6 +39,10 @@ class DiscordBot(discord.Client):
             name="configurar_log_caixa_fdm",
             description="Define o canal de auditoria do caixa",
         )(self.configurar_log_caixa_fdm)
+        self.tree.command(
+            name="dados_reset_fdm",
+            description="Abre as ferramentas protegidas de dados e reset",
+        )(self.dados_reset_fdm)
 
     async def setup_hook(self) -> None:
         self.database.initialize()
@@ -53,6 +57,30 @@ class DiscordBot(discord.Client):
     async def slash_oi(self, interaction: discord.Interaction) -> None:
         """Respond to the native /oi interaction."""
         await interaction.response.send_message("Olá! 👋")
+
+    async def dados_reset_fdm(self, interaction: discord.Interaction) -> None:
+        """Expose database tools only to the Discord application owner."""
+        application = await self.application_info()
+        owner_ids = {application.owner.id}
+        if interaction.user.id not in owner_ids:
+            await interaction.response.send_message(
+                "Somente o proprietário registrado da aplicação pode usar este comando.",
+                ephemeral=True,
+                delete_after=15,
+            )
+            return
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Use este comando dentro do servidor que deseja administrar.",
+                ephemeral=True,
+                delete_after=15,
+            )
+            return
+        await interaction.response.send_message(
+            "Ferramentas protegidas de consulta e reset:",
+            view=DataToolsView(self.database),
+            ephemeral=True,
+        )
 
     async def configurar_logs_fdm(
         self,

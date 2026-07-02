@@ -134,12 +134,12 @@ async def test_product_kind_selector_opens_modal_and_removes_menu(database: Data
 def test_admin_panel_groups_direct_actions_by_row(database: Database) -> None:
     panel = ConfigPanel(database)
 
-    assert len(panel.children) == 18
+    assert len(panel.children) == 17
     rows: dict[int | None, int] = {}
     for child in panel.children:
         row = getattr(child, "row", None)
         rows[row] = rows.get(row, 0) + 1
-    assert rows == {0: 4, 1: 3, 2: 4, 3: 3, 4: 4}
+    assert rows == {0: 4, 1: 3, 2: 4, 3: 3, 4: 3}
 
 
 @pytest.mark.asyncio

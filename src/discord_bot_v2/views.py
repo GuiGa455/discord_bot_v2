@@ -1855,6 +1855,7 @@ class ConfigPanel(discord.ui.View):
         hidden_ids = {
             "fdm:config:add-sale-product",
             "fdm:config:add-sale-stock",
+            "fdm:config:data-tools",
         }
         for item in list(self.children):
             if getattr(item, "custom_id", None) in hidden_ids:
