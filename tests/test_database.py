@@ -44,6 +44,79 @@ def test_database_removes_product_without_losing_entry_history(tmp_path) -> None
     assert database.list_products(1) == []
 
 
+def test_removing_product_also_removes_it_from_active_goal(tmp_path) -> None:
+    database = Database(str(tmp_path / "bot.db"))
+    database.initialize()
+    product = database.add_product(1, "Madeira")
+    goal = database.create_goal(1, "2026-01-01T00:00:00+00:00", "2027-01-01T00:00:00+00:00")
+    database.set_goal_item(goal.id, product, Decimal("100"))
+    database.activate_goal(1, goal.id)
+
+    assert database.remove_product(1, product.id) is True
+    assert database.get_active_goal(1) is None
+
+
+def test_sale_updates_stock_cash_and_reports(tmp_path) -> None:
+    database = Database(str(tmp_path / "bot.db"))
+    database.initialize()
+    product = database.add_product(1, "Cobre", Decimal("25.50"))
+    database.add_entry(
+        guild_id=1,
+        member_id=10,
+        actor_id=10,
+        actor_was_admin=False,
+        product=product,
+        quantity=Decimal("10"),
+    )
+
+    sale = database.register_sale(
+        guild_id=1, actor_id=99, product=product, quantity=Decimal("2")
+    )
+
+    assert sale.total == Decimal("51.00")
+    assert database.stock_totals(1)["Cobre"] == Decimal("8")
+    assert database.cash_balance(1) == Decimal("51.00")
+    assert database.sales_total(1) == Decimal("51.00")
+    assert database.list_sales(
+        1,
+        start_at="2000-01-01T00:00:00+00:00",
+        end_at="2100-01-01T00:00:00+00:00",
+    )[0].product_name == "Cobre"
+    assert database.database_summary(1)["sales"] == 1
+
+    database.set_product_price(1, product.id, Decimal("30"))
+    assert database.list_products(1)[0].sale_price == Decimal("30")
+    database.set_product_price(1, product.id, None)
+    assert database.list_products(1)[0].sale_price is None
+
+
+def test_protected_reset_preserves_configuration(tmp_path) -> None:
+    database = Database(str(tmp_path / "bot.db"))
+    database.initialize()
+    product = database.add_product(1, "Cobre", Decimal("10"))
+    database.save_farm_channel(1, 10, 100)
+    database.set_reset_role(1, 500)
+    database.add_entry(
+        guild_id=1,
+        member_id=10,
+        actor_id=10,
+        actor_was_admin=False,
+        product=product,
+        quantity=Decimal("2"),
+    )
+    database.add_cash_transaction(
+        guild_id=1, actor_id=99, kind="income", amount=Decimal("20"), reason="Teste"
+    )
+
+    database.reset_operational_data(1)
+
+    assert database.product_totals(1) == {}
+    assert database.cash_balance(1) == Decimal(0)
+    assert database.list_products(1) == [product]
+    assert database.list_farm_channels(1)[0].channel_id == 100
+    assert database.get_reset_role(1) == 500
+
+
 def test_stock_totals_and_outputs(tmp_path) -> None:
     database = Database(str(tmp_path / "bot.db"))
     database.initialize()

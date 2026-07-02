@@ -25,6 +25,20 @@ def distribution_rule_name(rule: str) -> str:
 class Product:
     id: int
     name: str
+    sale_price: Decimal | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Sale:
+    id: int
+    product_name: str
+    quantity: Decimal
+    unit_price: Decimal
+    total: Decimal
+    actor_id: int
+    created_at: str
+    stock_output_id: int = 0
+    cash_transaction_id: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +106,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     guild_id INTEGER NOT NULL,
                     name TEXT NOT NULL COLLATE NOCASE,
+                    sale_price TEXT,
                     created_at TEXT NOT NULL,
                     UNIQUE (guild_id, name)
                 );
@@ -178,6 +193,27 @@ class Database:
                     member_id INTEGER,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS sales (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    actor_id INTEGER NOT NULL,
+                    product_id INTEGER,
+                    product_name TEXT NOT NULL,
+                    quantity TEXT NOT NULL,
+                    unit_price TEXT NOT NULL,
+                    total TEXT NOT NULL,
+                    stock_output_id INTEGER NOT NULL,
+                    cash_transaction_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_sales_period
+                ON sales (guild_id, created_at);
+                CREATE TABLE IF NOT EXISTS reset_permissions (
+                    guild_id INTEGER PRIMARY KEY,
+                    role_id INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS goal_settlements (
                     goal_id INTEGER PRIMARY KEY,
                     guild_id INTEGER NOT NULL,
@@ -217,6 +253,12 @@ class Database:
                 connection.execute(
                     "ALTER TABLE stock_outputs ADD COLUMN reason TEXT NOT NULL DEFAULT ''"
                 )
+            product_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(products)").fetchall()
+            }
+            if "sale_price" not in product_columns:
+                connection.execute("ALTER TABLE products ADD COLUMN sale_price TEXT")
             financial_columns = {
                 row["name"]
                 for row in connection.execute(
@@ -243,32 +285,258 @@ class Database:
     def list_products(self, guild_id: int) -> list[Product]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT id, name FROM products WHERE guild_id = ? ORDER BY name",
+                "SELECT id, name, sale_price FROM products WHERE guild_id = ? ORDER BY name",
                 (guild_id,),
             ).fetchall()
-        return [Product(id=row["id"], name=row["name"]) for row in rows]
+        return [
+            Product(
+                id=row["id"],
+                name=row["name"],
+                sale_price=Decimal(row["sale_price"]) if row["sale_price"] is not None else None,
+            )
+            for row in rows
+        ]
 
-    def add_product(self, guild_id: int, name: str) -> Product:
+    def add_product(
+        self, guild_id: int, name: str, sale_price: Decimal | None = None
+    ) -> Product:
         clean_name = " ".join(name.split())
         if not clean_name or len(clean_name) > 100:
             raise ValueError("O nome do produto deve ter entre 1 e 100 caracteres")
         with self._connect() as connection:
+            if sale_price is not None and sale_price <= 0:
+                raise ValueError("O preço de venda deve ser maior que zero")
             cursor = connection.execute(
-                "INSERT INTO products (guild_id, name, created_at) VALUES (?, ?, ?)",
-                (guild_id, clean_name, datetime.now(UTC).isoformat()),
+                """INSERT INTO products (guild_id, name, sale_price, created_at)
+                VALUES (?, ?, ?, ?)""",
+                (
+                    guild_id,
+                    clean_name,
+                    format(sale_price, "f") if sale_price is not None else None,
+                    datetime.now(UTC).isoformat(),
+                ),
             )
             if cursor.lastrowid is None:
                 raise RuntimeError("SQLite não retornou o identificador do produto")
             product_id = cursor.lastrowid
-        return Product(product_id, clean_name)
+        return Product(product_id, clean_name, sale_price)
+
+    def set_product_price(
+        self, guild_id: int, product_id: int, sale_price: Decimal | None
+    ) -> None:
+        if sale_price is not None and sale_price <= 0:
+            raise ValueError("O preço de venda deve ser maior que zero")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE products SET sale_price = ? WHERE guild_id = ? AND id = ?",
+                (
+                    format(sale_price, "f") if sale_price is not None else None,
+                    guild_id,
+                    product_id,
+                ),
+            )
+        if cursor.rowcount == 0:
+            raise ValueError("Produto não encontrado")
 
     def remove_product(self, guild_id: int, product_id: int) -> bool:
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            goal_rows = connection.execute(
+                "SELECT goal_id FROM goal_items WHERE product_id = ?", (product_id,)
+            ).fetchall()
+            connection.execute("DELETE FROM goal_items WHERE product_id = ?", (product_id,))
+            for row in goal_rows:
+                remaining = connection.execute(
+                    "SELECT 1 FROM goal_items WHERE goal_id = ? LIMIT 1", (row["goal_id"],)
+                ).fetchone()
+                if remaining is None:
+                    connection.execute(
+                        "UPDATE goals SET status = 'closed' WHERE id = ? AND status = 'active'",
+                        (row["goal_id"],),
+                    )
             cursor = connection.execute(
                 "DELETE FROM products WHERE guild_id = ? AND id = ?",
                 (guild_id, product_id),
             )
         return cursor.rowcount > 0
+
+    def register_sale(
+        self, *, guild_id: int, actor_id: int, product: Product, quantity: Decimal
+    ) -> Sale:
+        if quantity <= 0:
+            raise ValueError("A quantidade deve ser maior que zero")
+        if product.sale_price is None:
+            raise ValueError("Esse produto não possui preço de venda")
+        now = datetime.now(UTC).isoformat()
+        total = quantity * product.sale_price
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            entry_rows = connection.execute(
+                "SELECT quantity FROM farm_entries WHERE guild_id = ? AND product_name = ?",
+                (guild_id, product.name),
+            ).fetchall()
+            output_rows = connection.execute(
+                "SELECT quantity FROM stock_outputs WHERE guild_id = ? AND product_name = ?",
+                (guild_id, product.name),
+            ).fetchall()
+            available = sum((Decimal(row["quantity"]) for row in entry_rows), Decimal(0)) - sum(
+                (Decimal(row["quantity"]) for row in output_rows), Decimal(0)
+            )
+            if quantity > available:
+                raise ValueError(f"Estoque insuficiente. Disponível: {format(available, 'f')}")
+            output_cursor = connection.execute(
+                """INSERT INTO stock_outputs (
+                    guild_id, actor_id, product_id, product_name, quantity, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    guild_id,
+                    actor_id,
+                    product.id,
+                    product.name,
+                    format(quantity, "f"),
+                    "Venda",
+                    now,
+                ),
+            )
+            cash_cursor = connection.execute(
+                """INSERT INTO cash_transactions (
+                    guild_id, actor_id, kind, amount, reason, created_at
+                ) VALUES (?, ?, 'income', ?, ?, ?)""",
+                (
+                    guild_id,
+                    actor_id,
+                    format(total, "f"),
+                    f"Venda de {format(quantity, 'f')} {product.name}",
+                    now,
+                ),
+            )
+            sale_cursor = connection.execute(
+                """INSERT INTO sales (
+                    guild_id, actor_id, product_id, product_name, quantity, unit_price,
+                    total, stock_output_id, cash_transaction_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    guild_id,
+                    actor_id,
+                    product.id,
+                    product.name,
+                    format(quantity, "f"),
+                    format(product.sale_price, "f"),
+                    format(total, "f"),
+                    output_cursor.lastrowid,
+                    cash_cursor.lastrowid,
+                    now,
+                ),
+            )
+            if sale_cursor.lastrowid is None:
+                raise RuntimeError("SQLite não retornou o identificador da venda")
+            sale_id = sale_cursor.lastrowid
+        return Sale(
+            sale_id,
+            product.name,
+            quantity,
+            product.sale_price,
+            total,
+            actor_id,
+            now,
+            int(output_cursor.lastrowid or 0),
+            int(cash_cursor.lastrowid or 0),
+        )
+
+    def sales_total(
+        self, guild_id: int, *, start_at: str | None = None, end_at: str | None = None
+    ) -> Decimal:
+        clauses = ["guild_id = ?"]
+        parameters: list[int | str] = [guild_id]
+        if start_at is not None:
+            clauses.append("created_at >= ?")
+            parameters.append(start_at)
+        if end_at is not None:
+            clauses.append("created_at <= ?")
+            parameters.append(end_at)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT total FROM sales WHERE {' AND '.join(clauses)}", parameters
+            ).fetchall()
+        return sum((Decimal(row["total"]) for row in rows), Decimal(0))
+
+    def list_sales(
+        self, guild_id: int, *, start_at: str, end_at: str
+    ) -> list[Sale]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT id, product_name, quantity, unit_price, total, actor_id, created_at
+                FROM sales WHERE guild_id = ? AND created_at >= ? AND created_at <= ?
+                ORDER BY created_at""",
+                (guild_id, start_at, end_at),
+            ).fetchall()
+        return [
+            Sale(
+                id=row["id"],
+                product_name=row["product_name"],
+                quantity=Decimal(row["quantity"]),
+                unit_price=Decimal(row["unit_price"]),
+                total=Decimal(row["total"]),
+                actor_id=row["actor_id"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def set_reset_role(self, guild_id: int, role_id: int) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO reset_permissions (guild_id, role_id, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT (guild_id) DO UPDATE SET
+                    role_id = excluded.role_id, updated_at = excluded.updated_at""",
+                (guild_id, role_id, datetime.now(UTC).isoformat()),
+            )
+
+    def get_reset_role(self, guild_id: int) -> int | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT role_id FROM reset_permissions WHERE guild_id = ?", (guild_id,)
+            ).fetchone()
+        return int(row["role_id"]) if row else None
+
+    def database_summary(self, guild_id: int) -> dict[str, int]:
+        tables = (
+            "products",
+            "farm_channels",
+            "farm_entries",
+            "stock_outputs",
+            "goals",
+            "sales",
+            "cash_transactions",
+        )
+        with self._connect() as connection:
+            return {
+                table: int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE guild_id = ?", (guild_id,)
+                    ).fetchone()[0]
+                )
+                for table in tables
+            }
+
+    def reset_operational_data(self, guild_id: int) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            goal_ids = [
+                row["id"]
+                for row in connection.execute(
+                    "SELECT id FROM goals WHERE guild_id = ?", (guild_id,)
+                ).fetchall()
+            ]
+            for goal_id in goal_ids:
+                connection.execute("DELETE FROM goal_payouts WHERE goal_id = ?", (goal_id,))
+                connection.execute("DELETE FROM goal_settlements WHERE goal_id = ?", (goal_id,))
+            connection.execute("DELETE FROM goals WHERE guild_id = ?", (guild_id,))
+            connection.execute("DELETE FROM sales WHERE guild_id = ?", (guild_id,))
+            connection.execute("DELETE FROM farm_entries WHERE guild_id = ?", (guild_id,))
+            connection.execute("DELETE FROM stock_outputs WHERE guild_id = ?", (guild_id,))
+            connection.execute("DELETE FROM cash_transactions WHERE guild_id = ?", (guild_id,))
 
     def get_farm_channel(self, guild_id: int, member_id: int) -> FarmChannel | None:
         with self._connect() as connection:

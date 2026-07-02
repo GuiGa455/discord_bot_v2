@@ -25,6 +25,7 @@ from discord_bot_v2.finance import SettlementPreview, build_settlement_preview, 
 from discord_bot_v2.reporting import (
     build_admin_embed,
     build_farm_embed,
+    build_sales_embed,
     display_period,
     format_totals,
     parse_period,
@@ -108,7 +109,7 @@ async def _edit_admin_panel(
     database: Database,
 ) -> None:
     with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
-        message = await channel.fetch_message(message_id)
+        message = channel.get_partial_message(message_id)
         await message.edit(embed=embed, view=ConfigPanel(database))
 
 
@@ -119,7 +120,7 @@ async def _edit_farm_panel(
     database: Database,
 ) -> None:
     with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
-        message = await channel.fetch_message(message_id)
+        message = channel.get_partial_message(message_id)
         await message.edit(embed=embed, view=FarmPanel(database))
 
 
@@ -147,6 +148,12 @@ class ProductModal(discord.ui.Modal, title="Adicionar produto"):
         min_length=1,
         max_length=100,
     )
+    sale_price: discord.ui.TextInput[ProductModal] = discord.ui.TextInput(
+        label="Preço unitário de venda (opcional)",
+        placeholder="Ex.: 125.50",
+        required=False,
+        max_length=30,
+    )
 
     def __init__(self, database: Database) -> None:
         super().__init__()
@@ -161,7 +168,14 @@ class ProductModal(discord.ui.Modal, title="Adicionar produto"):
             )
             return
         try:
-            product = self.database.add_product(interaction.guild_id, str(self.name))
+            price_text = str(self.sale_price).strip().replace(",", ".")
+            price = Decimal(price_text) if price_text else None
+            product = self.database.add_product(interaction.guild_id, str(self.name), price)
+        except (InvalidOperation, ValueError) as exc:
+            await interaction.response.send_message(
+                str(exc) or "Informe um preço válido.", ephemeral=True, delete_after=15
+            )
+            return
         except sqlite3.IntegrityError:
             await interaction.response.send_message(
                 "Esse produto já está cadastrado.", ephemeral=True
@@ -187,15 +201,9 @@ class RemoveProductSelect(discord.ui.Select["RemoveProductView"]):
     async def callback(self, interaction: discord.Interaction) -> None:
         if not await _require_admin(interaction) or interaction.guild_id is None:
             return
-        try:
-            self.database.remove_product(interaction.guild_id, int(self.values[0]))
-        except sqlite3.IntegrityError:
-            await interaction.response.edit_message(
-                content="Esse produto pertence a uma meta e não pode ser removido.",
-                view=None,
-            )
-            return
         await interaction.response.defer(ephemeral=True)
+        self.database.remove_product(interaction.guild_id, int(self.values[0]))
+        await refresh_panels(interaction, self.database, refresh_all_farms=True)
         await _delete_temporary_message(interaction)
 
 
@@ -1146,6 +1154,292 @@ class DistributionRuleView(discord.ui.View):
         self.add_item(DistributionRuleSelect(database, current_rule))
 
 
+class ProductPriceModal(discord.ui.Modal, title="Definir preço de venda"):
+    price: discord.ui.TextInput[ProductPriceModal] = discord.ui.TextInput(
+        label="Preço unitário (deixe vazio para remover)",
+        placeholder="Ex.: 125.50",
+        required=False,
+        max_length=30,
+    )
+
+    def __init__(self, database: Database, product: Product) -> None:
+        super().__init__()
+        self.database = database
+        self.product = product
+        if product.sale_price is not None:
+            self.price.default = format(product.sale_price, "f")
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        try:
+            text = str(self.price).strip().replace(",", ".")
+            price = Decimal(text) if text else None
+            self.database.set_product_price(interaction.guild_id, self.product.id, price)
+        except (InvalidOperation, ValueError) as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True, delete_after=15)
+            return
+        description = money(price) if price is not None else "sem preço"
+        await interaction.response.send_message(
+            f"**{self.product.name}** atualizado para **{description}**.",
+            ephemeral=True,
+            delete_after=10,
+        )
+
+
+class ProductPriceSelect(discord.ui.Select["ProductPriceView"]):
+    def __init__(self, database: Database, products: list[Product]) -> None:
+        self.database = database
+        self.products = {str(product.id): product for product in products}
+        super().__init__(
+            placeholder="Selecione o produto",
+            options=[
+                discord.SelectOption(
+                    label=product.name,
+                    value=str(product.id),
+                    description=(
+                        f"Preço atual: {money(product.sale_price)}"
+                        if product.sale_price is not None
+                        else "Sem preço de venda"
+                    ),
+                )
+                for product in products
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.send_modal(
+            ProductPriceModal(self.database, self.products[self.values[0]])
+        )
+
+
+class ProductPriceView(discord.ui.View):
+    def __init__(self, database: Database, products: list[Product]) -> None:
+        super().__init__(timeout=120)
+        self.add_item(ProductPriceSelect(database, products))
+
+
+class SaleQuantityModal(discord.ui.Modal, title="Registrar venda"):
+    quantity: discord.ui.TextInput[SaleQuantityModal] = discord.ui.TextInput(
+        label="Quantidade vendida", placeholder="Ex.: 12,5", min_length=1, max_length=30
+    )
+
+    def __init__(self, database: Database, product: Product) -> None:
+        super().__init__()
+        self.database = database
+        self.product = product
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if (
+            not await _require_admin(interaction)
+            or interaction.guild_id is None
+            or interaction.guild is None
+        ):
+            return
+        try:
+            quantity = Decimal(str(self.quantity).strip().replace(",", "."))
+            sale = self.database.register_sale(
+                guild_id=interaction.guild_id,
+                actor_id=interaction.user.id,
+                product=self.product,
+                quantity=quantity,
+            )
+        except (InvalidOperation, ValueError) as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True, delete_after=15)
+            return
+        balance = self.database.cash_balance(interaction.guild_id)
+        await interaction.response.send_message(
+            f"✅ Venda `#{sale.id}` registrada: **{format(quantity, 'f')} "
+            f"{sale.product_name}** por **{money(sale.total)}**.",
+            ephemeral=True,
+            delete_after=15,
+        )
+        await asyncio.gather(
+            send_output_log(
+                guild=interaction.guild,
+                database=self.database,
+                actor_id=interaction.user.id,
+                product=self.product,
+                quantity=quantity,
+                reason=f"Venda #{sale.id}",
+                output_id=sale.stock_output_id,
+            ),
+            send_cash_log(
+                guild=interaction.guild,
+                database=self.database,
+                title="💵 Venda registrada",
+                amount=sale.total,
+                reason=f"Venda #{sale.id}: {format(quantity, 'f')} {sale.product_name}",
+                actor_id=interaction.user.id,
+                balance=balance,
+                color=discord.Color.green(),
+            ),
+            refresh_panels(interaction, self.database),
+        )
+
+
+class SaleProductSelect(discord.ui.Select["SaleProductView"]):
+    def __init__(self, database: Database, products: list[Product]) -> None:
+        self.database = database
+        self.products = {str(product.id): product for product in products}
+        super().__init__(
+            placeholder="Selecione o produto vendido",
+            options=[
+                discord.SelectOption(
+                    label=product.name,
+                    value=str(product.id),
+                    description=f"Preço unitário: {money(product.sale_price or Decimal(0))}",
+                )
+                for product in products
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.send_modal(
+            SaleQuantityModal(self.database, self.products[self.values[0]])
+        )
+
+
+class SaleProductView(discord.ui.View):
+    def __init__(self, database: Database, products: list[Product]) -> None:
+        super().__init__(timeout=120)
+        self.add_item(SaleProductSelect(database, products))
+
+
+class SalesPeriodSelect(discord.ui.Select["SalesReportView"]):
+    def __init__(self, database: Database) -> None:
+        self.database = database
+        super().__init__(
+            placeholder="Selecione o período",
+            options=[
+                discord.SelectOption(label="Hoje", value="day"),
+                discord.SelectOption(label="Semana atual", value="week"),
+                discord.SelectOption(label="Mês atual", value="month"),
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        await interaction.response.edit_message(
+            content=None,
+            embed=build_sales_embed(self.database, interaction.guild_id, self.values[0]),
+            view=self.view,
+        )
+
+
+class SalesReportView(discord.ui.View):
+    def __init__(self, database: Database) -> None:
+        super().__init__(timeout=300)
+        self.add_item(SalesPeriodSelect(database))
+
+
+class ResetRoleSelect(discord.ui.RoleSelect["DataToolsView"]):
+    def __init__(self, database: Database) -> None:
+        super().__init__(placeholder="Definir cargo autorizado para reset", max_values=1)
+        self.database = database
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        role = self.values[0]
+        self.database.set_reset_role(interaction.guild_id, role.id)
+        await interaction.response.send_message(
+            f"Cargo <@&{role.id}> autorizado para reset.", ephemeral=True, delete_after=10
+        )
+
+
+class ResetDatabaseModal(discord.ui.Modal, title="Resetar dados operacionais"):
+    confirmation: discord.ui.TextInput[ResetDatabaseModal] = discord.ui.TextInput(
+        label="Confirmação exigida", min_length=1, max_length=40
+    )
+
+    def __init__(self, database: Database, guild_id: int) -> None:
+        super().__init__()
+        self.database = database
+        self.guild_id = guild_id
+        self.confirmation.placeholder = f"Digite RESETAR {guild_id}"
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction) or not isinstance(
+            interaction.user, discord.Member
+        ):
+            return
+        role_id = self.database.get_reset_role(self.guild_id)
+        has_role = role_id is not None and any(
+            role.id == role_id for role in interaction.user.roles
+        )
+        if not has_role:
+            await interaction.response.send_message(
+                "Você não possui o cargo específico autorizado para reset.",
+                ephemeral=True,
+                delete_after=15,
+            )
+            return
+        if str(self.confirmation).strip() != f"RESETAR {self.guild_id}":
+            await interaction.response.send_message(
+                "Confirmação incorreta. Nenhum dado foi apagado.", ephemeral=True, delete_after=15
+            )
+            return
+        self.database.reset_operational_data(self.guild_id)
+        await interaction.response.send_message(
+            "✅ Coletas, estoque, metas, vendas e movimentações do caixa foram zerados. "
+            "Produtos, preços, salas e configurações foram preservados.",
+            ephemeral=True,
+        )
+        await refresh_panels(interaction, self.database, refresh_all_farms=True)
+
+
+class DataToolsView(discord.ui.View):
+    def __init__(self, database: Database) -> None:
+        super().__init__(timeout=300)
+        self.database = database
+        self.add_item(ResetRoleSelect(database))
+
+    @discord.ui.button(label="Resumo do banco", style=discord.ButtonStyle.secondary, row=1)
+    async def summary(
+        self, interaction: discord.Interaction, _: discord.ui.Button[DataToolsView]
+    ) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        summary = self.database.database_summary(interaction.guild_id)
+        labels = {
+            "products": "Produtos",
+            "farm_channels": "Salas FARME",
+            "farm_entries": "Coletas",
+            "stock_outputs": "Saídas de estoque",
+            "goals": "Metas",
+            "sales": "Vendas",
+            "cash_transactions": "Movimentações de caixa",
+        }
+        embed = discord.Embed(title="Resumo do banco de dados", color=discord.Color.blurple())
+        embed.description = "\n".join(
+            f"**{labels[key]}:** {value}" for key, value in summary.items()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Reset protegido", style=discord.ButtonStyle.danger, row=1)
+    async def reset(
+        self, interaction: discord.Interaction, _: discord.ui.Button[DataToolsView]
+    ) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        if self.database.get_reset_role(interaction.guild_id) is None:
+            await interaction.response.send_message(
+                "Defina primeiro o cargo autorizado no seletor acima.",
+                ephemeral=True,
+                delete_after=15,
+            )
+            return
+        await interaction.response.send_modal(
+            ResetDatabaseModal(self.database, interaction.guild_id)
+        )
+
+
 class ConfigPanel(discord.ui.View):
     def __init__(self, database: Database) -> None:
         super().__init__(timeout=None)
@@ -1433,5 +1727,95 @@ class ConfigPanel(discord.ui.View):
             f"Regra vigente: **{distribution_rule_name(current_rule)}**.\n"
             "Escolha a regra aplicada ao próximo fechamento:",
             view=DistributionRuleView(self.database, current_rule),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="Preços",
+        style=discord.ButtonStyle.secondary,
+        emoji="🏷️",
+        custom_id="fdm:config:prices",
+        row=4,
+    )
+    async def prices(
+        self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
+    ) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        products = self.database.list_products(interaction.guild_id)
+        if not products:
+            await interaction.response.send_message(
+                "Cadastre um produto primeiro.", ephemeral=True, delete_after=10
+            )
+            return
+        await interaction.response.send_message(
+            "Selecione o produto cujo preço deseja alterar:",
+            view=ProductPriceView(self.database, products),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="Registrar venda",
+        style=discord.ButtonStyle.green,
+        emoji="🛒",
+        custom_id="fdm:config:sale",
+        row=4,
+    )
+    async def sale(
+        self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
+    ) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        products = [
+            product
+            for product in self.database.list_products(interaction.guild_id)
+            if product.sale_price is not None
+        ]
+        if not products:
+            await interaction.response.send_message(
+                "Nenhum produto possui preço de venda. Use o botão **Preços**.",
+                ephemeral=True,
+                delete_after=15,
+            )
+            return
+        await interaction.response.send_message(
+            "Selecione o produto vendido:",
+            view=SaleProductView(self.database, products),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="Relatório de vendas",
+        style=discord.ButtonStyle.primary,
+        emoji="📊",
+        custom_id="fdm:config:sales-report",
+        row=4,
+    )
+    async def sales_report(
+        self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
+    ) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        await interaction.response.send_message(
+            embed=build_sales_embed(self.database, interaction.guild_id, "week"),
+            view=SalesReportView(self.database),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="Dados / reset",
+        style=discord.ButtonStyle.danger,
+        emoji="🗄️",
+        custom_id="fdm:config:data-tools",
+        row=4,
+    )
+    async def data_tools(
+        self, interaction: discord.Interaction, _: discord.ui.Button[ConfigPanel]
+    ) -> None:
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.send_message(
+            "Consulte o resumo ou configure o cargo necessário para um reset protegido.",
+            view=DataToolsView(self.database),
             ephemeral=True,
         )

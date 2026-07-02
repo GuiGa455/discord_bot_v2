@@ -17,6 +17,7 @@ from discord_bot_v2.views import (
     OutputQuantityModal,
     PeriodReportModal,
     ProductModal,
+    ProductPriceModal,
     ProductSelect,
     ProductSelectView,
     QuantityModal,
@@ -73,6 +74,26 @@ async def test_product_modal_rejects_duplicate(database: Database) -> None:
 
     message = item.response.send_message.await_args.args[0]
     assert "já está" in message
+
+
+@pytest.mark.asyncio
+async def test_product_price_modal_sets_and_removes_price(database: Database) -> None:
+    product = database.add_product(1, "Madeira")
+    item = interaction()
+    modal = ProductPriceModal(database, product)
+    modal.price._value = "15,50"
+
+    with patch("discord_bot_v2.views._require_admin", AsyncMock(return_value=True)):
+        await modal.on_submit(item)
+
+    assert database.list_products(1)[0].sale_price == Decimal("15.50")
+
+    remove_modal = ProductPriceModal(database, database.list_products(1)[0])
+    remove_modal.price._value = ""
+    with patch("discord_bot_v2.views._require_admin", AsyncMock(return_value=True)):
+        await remove_modal.on_submit(item)
+
+    assert database.list_products(1)[0].sale_price is None
 
 
 @pytest.mark.asyncio

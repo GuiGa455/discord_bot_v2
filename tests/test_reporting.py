@@ -5,11 +5,13 @@ from discord_bot_v2.database import Database, GoalProgress, Product
 from discord_bot_v2.reporting import (
     build_admin_embed,
     build_farm_embed,
+    build_sales_embed,
     display_period,
     format_progress,
     format_totals,
     parse_period,
     progress_bar,
+    sales_period,
 )
 
 
@@ -55,3 +57,32 @@ def test_build_panel_embeds(tmp_path) -> None:
     assert "✅" in farm_embed.fields[0].value
     assert "100.0%" in admin_embed.fields[3].value
     assert "Proporcional ao progresso" in admin_embed.fields[2].value
+
+
+def test_sales_periods_and_report(tmp_path) -> None:
+    database = Database(str(tmp_path / "bot.db"))
+    database.initialize()
+    product = database.add_product(1, "Ferro", Decimal("20"))
+    database.add_entry(
+        guild_id=1,
+        member_id=10,
+        actor_id=10,
+        actor_was_admin=False,
+        product=product,
+        quantity=Decimal("5"),
+    )
+    database.register_sale(guild_id=1, actor_id=99, product=product, quantity=Decimal("2"))
+
+    day_start, _, day_label = sales_period("day")
+    month_start, _, month_label = sales_period("month")
+    week_start, _, week_label = sales_period("week")
+    embed = build_sales_embed(database, 1, "week")
+
+    assert "Hoje" in day_label
+    assert "Mês atual" in month_label
+    assert "Semana atual" in week_label
+    assert day_start >= month_start
+    assert week_start
+    assert "$40.00" in embed.fields[0].value
+    assert "Ferro" in embed.fields[2].value
+    assert "█" in embed.fields[3].value

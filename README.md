@@ -125,6 +125,28 @@ Configure o canal que receberá entradas, despesas e fechamentos do caixa com:
 
 O bot precisa das permissões **Ver canal** e **Enviar mensagens** nesse destino.
 
+### Produtos, vendas e relatórios
+
+Produtos podem ter um preço unitário opcional, definido ao cadastrar ou pelo botão
+**Preços**. O botão **Registrar venda** aceita somente produtos com preço, valida o estoque,
+registra a saída e adiciona o total ao caixa em uma única transação. Alterações futuras no
+preço não mudam vendas antigas.
+
+O painel separa o saldo real do caixa do total vendido na semana atual. Em **Relatório de
+vendas**, administradores podem consultar o dia, a semana ou o mês atual, com totais por
+produto e um gráfico diário em texto.
+
+Ao excluir um produto, ele também é retirado das metas que o utilizam. Coletas, saídas e
+vendas antigas mantêm o nome e os valores históricos.
+
+### Consulta e reset do banco
+
+O botão **Dados / reset** mostra um resumo das tabelas do servidor. O reset preserva
+produtos, preços, salas FARME, painéis, canais de log e configurações, mas apaga coletas,
+estoque, metas, vendas e movimentações do caixa. Para executá-lo é necessário ser
+administrador, possuir o cargo específico configurado no seletor e digitar a confirmação
+exata exibida pelo bot.
+
 ## Estrutura
 
 ```text

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -28,6 +28,51 @@ def display_period(start_at: str, end_at: str) -> str:
     start = datetime.fromisoformat(start_at).astimezone(LOCAL_TIMEZONE)
     end = datetime.fromisoformat(end_at).astimezone(LOCAL_TIMEZONE)
     return f"{start:%d/%m/%Y} a {end:%d/%m/%Y}"
+
+
+def sales_period(kind: str, now: datetime | None = None) -> tuple[str, str, str]:
+    local_now = (now or datetime.now(LOCAL_TIMEZONE)).astimezone(LOCAL_TIMEZONE)
+    if kind == "day":
+        start_date = local_now.date()
+        label = f"Hoje — {start_date:%d/%m/%Y}"
+    elif kind == "month":
+        start_date = local_now.date().replace(day=1)
+        label = f"Mês atual — {start_date:%m/%Y}"
+    else:
+        start_date = local_now.date() - timedelta(days=local_now.weekday())
+        label = f"Semana atual — desde {start_date:%d/%m/%Y}"
+    start = datetime.combine(start_date, time.min, LOCAL_TIMEZONE).astimezone(UTC)
+    end = local_now.astimezone(UTC)
+    return start.isoformat(), end.isoformat(), label
+
+
+def build_sales_embed(database: Database, guild_id: int, period: str) -> discord.Embed:
+    start_at, end_at, label = sales_period(period)
+    sales = database.list_sales(guild_id, start_at=start_at, end_at=end_at)
+    embed = discord.Embed(
+        title="Relatório de vendas", description=label, color=discord.Color.gold()
+    )
+    total = sum((sale.total for sale in sales), Decimal(0))
+    embed.add_field(name="Total vendido", value=format_usd(total))
+    embed.add_field(name="Número de vendas", value=str(len(sales)))
+    by_product: dict[str, Decimal] = {}
+    by_day: dict[str, Decimal] = {}
+    for sale in sales:
+        by_product[sale.product_name] = by_product.get(sale.product_name, Decimal(0)) + sale.total
+        day = datetime.fromisoformat(sale.created_at).astimezone(LOCAL_TIMEZONE).strftime("%d/%m")
+        by_day[day] = by_day.get(day, Decimal(0)) + sale.total
+    products = "\n".join(
+        f"• **{name}:** {format_usd(value)}" for name, value in sorted(by_product.items())
+    ) or "Nenhuma venda no período."
+    embed.add_field(name="Por produto", value=products[:1024], inline=False)
+    if by_day:
+        maximum = max(by_day.values())
+        chart = "\n".join(
+            f"`{day}` {'█' * max(1, int(value / maximum * 12))} {format_usd(value)}"
+            for day, value in sorted(by_day.items())
+        )
+        embed.add_field(name="Vendas por dia", value=chart[:1024], inline=False)
+    return embed
 
 
 def format_totals(totals: dict[str, Decimal]) -> str:
@@ -116,10 +161,13 @@ def build_admin_embed(database: Database, guild_id: int) -> discord.Embed:
     )
     reserve_rate = database.get_reserve_rate(guild_id)
     distribution_rule = distribution_rule_name(database.get_distribution_rule(guild_id))
+    week_start, week_end, _ = sales_period("week")
+    weekly_sales = database.sales_total(guild_id, start_at=week_start, end_at=week_end)
     embed.add_field(
         name="Caixa da firma",
         value=(
             f"**Saldo:** {format_usd(database.cash_balance(guild_id))}\n"
+            f"**Vendido nesta semana:** {format_usd(weekly_sales)}\n"
             f"**Reserva:** {format(reserve_rate * 100, 'f')}%\n"
             f"**Regra de divisão:** {distribution_rule}"
         ),
