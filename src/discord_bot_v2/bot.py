@@ -25,6 +25,7 @@ class DiscordBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self._guild_commands_synced = False
         self._farm_panels_restored = False
+        self._admin_panels_restored = False
         self.tree.command(name="oi", description="Receba uma saudação do bot")(self.slash_oi)
         self.tree.command(
             name="configurar_bot_fdm",
@@ -192,6 +193,10 @@ class DiscordBot(discord.Client):
             await self._sync_commands_to_guilds()
         if not self._farm_panels_restored:
             await self._restore_farm_panels()
+        if not self._admin_panels_restored:
+            for guild in self.guilds:
+                await refresh_guild_panels(guild, self.database)
+            self._admin_panels_restored = True
 
     async def _restore_farm_panels(self) -> None:
         """Upgrade panels created before their message IDs were persisted."""

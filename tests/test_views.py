@@ -8,6 +8,7 @@ import pytest
 from discord_bot_v2.database import Database, FarmChannel, Product
 from discord_bot_v2.views import (
     CashTransactionModal,
+    ConfigPanel,
     DeleteFarmRoomView,
     EditGoalModal,
     FarmPanel,
@@ -21,6 +22,8 @@ from discord_bot_v2.views import (
     ProductSelect,
     ProductSelectView,
     QuantityModal,
+    SaleProductModal,
+    SaleStockInputModal,
 )
 
 
@@ -59,6 +62,7 @@ async def test_product_modal_adds_product(database: Database) -> None:
         await modal.on_submit(item)
 
     assert database.list_products(1)[0].name == "Minério"
+    assert database.list_products(1)[0].kind == "farm"
     item.response.send_message.assert_awaited_once()
 
 
@@ -77,8 +81,8 @@ async def test_product_modal_rejects_duplicate(database: Database) -> None:
 
 
 @pytest.mark.asyncio
-async def test_product_price_modal_sets_and_removes_price(database: Database) -> None:
-    product = database.add_product(1, "Madeira")
+async def test_product_price_modal_sets_price(database: Database) -> None:
+    product = database.add_product(1, "Madeira", Decimal("10"), kind="sale")
     item = interaction()
     modal = ProductPriceModal(database, product)
     modal.price._value = "15,50"
@@ -88,12 +92,41 @@ async def test_product_price_modal_sets_and_removes_price(database: Database) ->
 
     assert database.list_products(1)[0].sale_price == Decimal("15.50")
 
-    remove_modal = ProductPriceModal(database, database.list_products(1)[0])
-    remove_modal.price._value = ""
-    with patch("discord_bot_v2.views._require_admin", AsyncMock(return_value=True)):
-        await remove_modal.on_submit(item)
 
-    assert database.list_products(1)[0].sale_price is None
+
+@pytest.mark.asyncio
+async def test_sale_product_and_stock_input_modals(database: Database) -> None:
+    item = interaction()
+    product_modal = SaleProductModal(database)
+    product_modal.name._value = "Pistola"
+    product_modal.price._value = "5000"
+
+    with patch("discord_bot_v2.views._require_admin", AsyncMock(return_value=True)):
+        await product_modal.on_submit(item)
+
+    product = database.list_products(1, kind="sale")[0]
+    assert product.name == "Pistola"
+    assert product.sale_price == Decimal("5000")
+
+    stock_modal = SaleStockInputModal(database, product)
+    stock_modal.quantity._value = "10"
+    with patch("discord_bot_v2.views._require_admin", AsyncMock(return_value=True)):
+        await stock_modal.on_submit(item)
+
+    assert database.stock_totals(1)["Pistola"] == Decimal("10")
+
+
+def test_compact_admin_panel_has_five_categories(database: Database) -> None:
+    panel = ConfigPanel(database)
+
+    assert len(panel.children) == 5
+    assert {getattr(child, "label", None) for child in panel.children} == {
+        "Salas FARME",
+        "Produtos / Estoque",
+        "Metas",
+        "Financeiro / Vendas",
+        "Administração",
+    }
 
 
 @pytest.mark.asyncio

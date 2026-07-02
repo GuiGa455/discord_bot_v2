@@ -26,6 +26,7 @@ class Product:
     id: int
     name: str
     sale_price: Decimal | None = None
+    kind: str = "farm"
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +108,7 @@ class Database:
                     guild_id INTEGER NOT NULL,
                     name TEXT NOT NULL COLLATE NOCASE,
                     sale_price TEXT,
+                    kind TEXT NOT NULL DEFAULT 'farm',
                     created_at TEXT NOT NULL,
                     UNIQUE (guild_id, name)
                 );
@@ -139,6 +141,17 @@ class Database:
                     product_id INTEGER,
                     product_name TEXT NOT NULL,
                     quantity TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
+                );
+                CREATE TABLE IF NOT EXISTS stock_inputs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    actor_id INTEGER NOT NULL,
+                    product_id INTEGER,
+                    product_name TEXT NOT NULL,
+                    quantity TEXT NOT NULL,
+                    reason TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
                 );
@@ -259,6 +272,13 @@ class Database:
             }
             if "sale_price" not in product_columns:
                 connection.execute("ALTER TABLE products ADD COLUMN sale_price TEXT")
+            if "kind" not in product_columns:
+                connection.execute(
+                    "ALTER TABLE products ADD COLUMN kind TEXT NOT NULL DEFAULT 'farm'"
+                )
+                connection.execute(
+                    "UPDATE products SET kind = 'sale' WHERE sale_price IS NOT NULL"
+                )
             financial_columns = {
                 row["name"]
                 for row in connection.execute(
@@ -282,55 +302,72 @@ class Database:
                     "TEXT NOT NULL DEFAULT 'proportional'"
                 )
 
-    def list_products(self, guild_id: int) -> list[Product]:
+    def list_products(self, guild_id: int, *, kind: str | None = None) -> list[Product]:
+        if kind not in {None, "farm", "sale"}:
+            raise ValueError("Tipo de produto inválido")
+        query = "SELECT id, name, sale_price, kind FROM products WHERE guild_id = ?"
+        parameters: list[int | str] = [guild_id]
+        if kind is not None:
+            query += " AND kind = ?"
+            parameters.append(kind)
+        query += " ORDER BY name"
         with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT id, name, sale_price FROM products WHERE guild_id = ? ORDER BY name",
-                (guild_id,),
-            ).fetchall()
+            rows = connection.execute(query, parameters).fetchall()
         return [
             Product(
                 id=row["id"],
                 name=row["name"],
                 sale_price=Decimal(row["sale_price"]) if row["sale_price"] is not None else None,
+                kind=row["kind"],
             )
             for row in rows
         ]
 
     def add_product(
-        self, guild_id: int, name: str, sale_price: Decimal | None = None
+        self,
+        guild_id: int,
+        name: str,
+        sale_price: Decimal | None = None,
+        kind: str = "farm",
     ) -> Product:
         clean_name = " ".join(name.split())
         if not clean_name or len(clean_name) > 100:
             raise ValueError("O nome do produto deve ter entre 1 e 100 caracteres")
+        if kind not in {"farm", "sale"}:
+            raise ValueError("Tipo de produto inválido")
+        if kind == "farm" and sale_price is not None:
+            raise ValueError("Produtos de farme não precisam de preço")
+        if kind == "sale" and sale_price is None:
+            raise ValueError("Produtos de venda precisam de preço")
         with self._connect() as connection:
             if sale_price is not None and sale_price <= 0:
                 raise ValueError("O preço de venda deve ser maior que zero")
             cursor = connection.execute(
-                """INSERT INTO products (guild_id, name, sale_price, created_at)
-                VALUES (?, ?, ?, ?)""",
+                """INSERT INTO products (guild_id, name, sale_price, kind, created_at)
+                VALUES (?, ?, ?, ?, ?)""",
                 (
                     guild_id,
                     clean_name,
                     format(sale_price, "f") if sale_price is not None else None,
+                    kind,
                     datetime.now(UTC).isoformat(),
                 ),
             )
             if cursor.lastrowid is None:
                 raise RuntimeError("SQLite não retornou o identificador do produto")
             product_id = cursor.lastrowid
-        return Product(product_id, clean_name, sale_price)
+        return Product(product_id, clean_name, sale_price, kind)
 
     def set_product_price(
         self, guild_id: int, product_id: int, sale_price: Decimal | None
     ) -> None:
-        if sale_price is not None and sale_price <= 0:
+        if sale_price is None or sale_price <= 0:
             raise ValueError("O preço de venda deve ser maior que zero")
         with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE products SET sale_price = ? WHERE guild_id = ? AND id = ?",
                 (
-                    format(sale_price, "f") if sale_price is not None else None,
+                    format(sale_price, "f"),
                     guild_id,
                     product_id,
                 ),
@@ -375,12 +412,18 @@ class Database:
                 "SELECT quantity FROM farm_entries WHERE guild_id = ? AND product_name = ?",
                 (guild_id, product.name),
             ).fetchall()
+            input_rows = connection.execute(
+                "SELECT quantity FROM stock_inputs WHERE guild_id = ? AND product_name = ?",
+                (guild_id, product.name),
+            ).fetchall()
             output_rows = connection.execute(
                 "SELECT quantity FROM stock_outputs WHERE guild_id = ? AND product_name = ?",
                 (guild_id, product.name),
             ).fetchall()
-            available = sum((Decimal(row["quantity"]) for row in entry_rows), Decimal(0)) - sum(
-                (Decimal(row["quantity"]) for row in output_rows), Decimal(0)
+            available = (
+                sum((Decimal(row["quantity"]) for row in entry_rows), Decimal(0))
+                + sum((Decimal(row["quantity"]) for row in input_rows), Decimal(0))
+                - sum((Decimal(row["quantity"]) for row in output_rows), Decimal(0))
             )
             if quantity > available:
                 raise ValueError(f"Estoque insuficiente. Disponível: {format(available, 'f')}")
@@ -506,6 +549,7 @@ class Database:
             "farm_channels",
             "farm_entries",
             "stock_outputs",
+            "stock_inputs",
             "goals",
             "sales",
             "cash_transactions",
@@ -536,6 +580,7 @@ class Database:
             connection.execute("DELETE FROM sales WHERE guild_id = ?", (guild_id,))
             connection.execute("DELETE FROM farm_entries WHERE guild_id = ?", (guild_id,))
             connection.execute("DELETE FROM stock_outputs WHERE guild_id = ?", (guild_id,))
+            connection.execute("DELETE FROM stock_inputs WHERE guild_id = ?", (guild_id,))
             connection.execute("DELETE FROM cash_transactions WHERE guild_id = ?", (guild_id,))
 
     def get_farm_channel(self, guild_id: int, member_id: int) -> FarmChannel | None:
@@ -660,15 +705,48 @@ class Database:
     def stock_totals(self, guild_id: int) -> dict[str, Decimal]:
         totals = self.product_totals(guild_id)
         with self._connect() as connection:
+            inputs = connection.execute(
+                "SELECT product_name, quantity FROM stock_inputs WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchall()
             outputs = connection.execute(
                 "SELECT product_name, quantity FROM stock_outputs WHERE guild_id = ?",
                 (guild_id,),
             ).fetchall()
+        for row in inputs:
+            totals[row["product_name"]] = totals.get(row["product_name"], Decimal(0)) + Decimal(
+                row["quantity"]
+            )
         for row in outputs:
             totals[row["product_name"]] = totals.get(row["product_name"], Decimal(0)) - Decimal(
                 row["quantity"]
             )
         return totals
+
+    def add_stock_input(
+        self, *, guild_id: int, actor_id: int, product: Product, quantity: Decimal
+    ) -> int:
+        if product.kind != "sale":
+            raise ValueError("A entrada manual é exclusiva para produtos de venda")
+        if quantity <= 0:
+            raise ValueError("A quantidade deve ser maior que zero")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """INSERT INTO stock_inputs (
+                    guild_id, actor_id, product_id, product_name, quantity, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'Entrada de produto para venda', ?)""",
+                (
+                    guild_id,
+                    actor_id,
+                    product.id,
+                    product.name,
+                    format(quantity, "f"),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise RuntimeError("SQLite não retornou o identificador da entrada")
+            return cursor.lastrowid
 
     def add_output(
         self,
@@ -691,13 +769,19 @@ class Database:
                 WHERE guild_id = ? AND product_name = ?""",
                 (guild_id, product.name),
             ).fetchall()
+            input_rows = connection.execute(
+                "SELECT quantity FROM stock_inputs WHERE guild_id = ? AND product_name = ?",
+                (guild_id, product.name),
+            ).fetchall()
             output_rows = connection.execute(
                 """SELECT quantity FROM stock_outputs
                 WHERE guild_id = ? AND product_name = ?""",
                 (guild_id, product.name),
             ).fetchall()
-            available = sum((Decimal(row["quantity"]) for row in entry_rows), Decimal(0)) - sum(
-                (Decimal(row["quantity"]) for row in output_rows), Decimal(0)
+            available = (
+                sum((Decimal(row["quantity"]) for row in entry_rows), Decimal(0))
+                + sum((Decimal(row["quantity"]) for row in input_rows), Decimal(0))
+                - sum((Decimal(row["quantity"]) for row in output_rows), Decimal(0))
             )
             if quantity > available:
                 raise ValueError(f"Estoque insuficiente. Disponível: {format(available, 'f')}")

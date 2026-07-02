@@ -62,14 +62,9 @@ def test_build_panel_embeds(tmp_path) -> None:
 def test_sales_periods_and_report(tmp_path) -> None:
     database = Database(str(tmp_path / "bot.db"))
     database.initialize()
-    product = database.add_product(1, "Ferro", Decimal("20"))
-    database.add_entry(
-        guild_id=1,
-        member_id=10,
-        actor_id=10,
-        actor_was_admin=False,
-        product=product,
-        quantity=Decimal("5"),
+    product = database.add_product(1, "Ferro", Decimal("20"), kind="sale")
+    database.add_stock_input(
+        guild_id=1, actor_id=10, product=product, quantity=Decimal("5")
     )
     database.register_sale(guild_id=1, actor_id=99, product=product, quantity=Decimal("2"))
 

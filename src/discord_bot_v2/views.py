@@ -148,11 +148,43 @@ class ProductModal(discord.ui.Modal, title="Adicionar produto"):
         min_length=1,
         max_length=100,
     )
-    sale_price: discord.ui.TextInput[ProductModal] = discord.ui.TextInput(
-        label="Preço unitário de venda (opcional)",
-        placeholder="Ex.: 125.50",
-        required=False,
-        max_length=30,
+    def __init__(self, database: Database) -> None:
+        super().__init__()
+        self.database = database
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        if len(self.database.list_products(interaction.guild_id)) >= 25:
+            await interaction.response.send_message(
+                "O limite atual é de 25 produtos por servidor.", ephemeral=True
+            )
+            return
+        try:
+            product = self.database.add_product(
+                interaction.guild_id, str(self.name), kind="farm"
+            )
+        except (InvalidOperation, ValueError) as exc:
+            await interaction.response.send_message(
+                str(exc) or "Informe um preço válido.", ephemeral=True, delete_after=15
+            )
+            return
+        except sqlite3.IntegrityError:
+            await interaction.response.send_message(
+                "Esse produto já está cadastrado.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            f"Produto **{product.name}** adicionado.", ephemeral=True, delete_after=10
+        )
+
+
+class SaleProductModal(discord.ui.Modal, title="Cadastrar produto de venda"):
+    name: discord.ui.TextInput[SaleProductModal] = discord.ui.TextInput(
+        label="Nome do produto", placeholder="Ex.: Pistola", min_length=1, max_length=100
+    )
+    price: discord.ui.TextInput[SaleProductModal] = discord.ui.TextInput(
+        label="Preço unitário", placeholder="Ex.: 5000.00", min_length=1, max_length=30
     )
 
     def __init__(self, database: Database) -> None:
@@ -168,21 +200,25 @@ class ProductModal(discord.ui.Modal, title="Adicionar produto"):
             )
             return
         try:
-            price_text = str(self.sale_price).strip().replace(",", ".")
-            price = Decimal(price_text) if price_text else None
-            product = self.database.add_product(interaction.guild_id, str(self.name), price)
-        except (InvalidOperation, ValueError) as exc:
-            await interaction.response.send_message(
-                str(exc) or "Informe um preço válido.", ephemeral=True, delete_after=15
+            price = Decimal(str(self.price).strip().replace(",", "."))
+            product = self.database.add_product(
+                interaction.guild_id,
+                str(self.name),
+                sale_price=price,
+                kind="sale",
             )
-            return
         except sqlite3.IntegrityError:
             await interaction.response.send_message(
                 "Esse produto já está cadastrado.", ephemeral=True
             )
             return
+        except (InvalidOperation, ValueError) as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True, delete_after=15)
+            return
         await interaction.response.send_message(
-            f"Produto **{product.name}** adicionado.", ephemeral=True, delete_after=10
+            f"Produto de venda **{product.name}** cadastrado por **{money(price)}**.",
+            ephemeral=True,
+            delete_after=10,
         )
 
 
@@ -554,7 +590,7 @@ class GoalTargetModal(discord.ui.Modal, title="Quantidade da meta"):
                             self.database,
                             interaction.guild_id,
                             self.goal_id,
-                            self.database.list_products(interaction.guild_id),
+                            self.database.list_products(interaction.guild_id, kind="farm"),
                         ),
                         ephemeral=True,
                     )
@@ -628,7 +664,7 @@ class GoalPeriodModal(discord.ui.Modal, title="Definir período da meta"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if not await _require_admin(interaction) or interaction.guild_id is None:
             return
-        products = self.database.list_products(interaction.guild_id)
+        products = self.database.list_products(interaction.guild_id, kind="farm")
         if not products:
             await interaction.response.send_message(
                 "Cadastre produtos antes de criar uma meta.", ephemeral=True
@@ -679,7 +715,7 @@ class EditGoalModal(discord.ui.Modal, title="Editar meta ativa"):
             await interaction.response.send_message(str(exc), ephemeral=True, delete_after=15)
             return
         self.database.update_goal_period(self.goal_id, start_at, end_at)
-        products = self.database.list_products(interaction.guild_id)
+        products = self.database.list_products(interaction.guild_id, kind="farm")
         await interaction.response.send_message(
             "Período atualizado. Selecione os produtos que deseja alterar e finalize.",
             view=GoalBuilderView(self.database, interaction.guild_id, self.goal_id, products),
@@ -917,7 +953,7 @@ class FarmPanel(discord.ui.View):
         if interaction.user.id != farm_channel.member_id and not _is_administrator(interaction):
             await interaction.response.send_message("Você não pode registrar aqui.", ephemeral=True)
             return
-        products = self.database.list_products(interaction.guild_id)
+        products = self.database.list_products(interaction.guild_id, kind="farm")
         if not products:
             await interaction.response.send_message(
                 "Nenhum produto foi configurado. Peça a um administrador para adicioná-los.",
@@ -1156,9 +1192,9 @@ class DistributionRuleView(discord.ui.View):
 
 class ProductPriceModal(discord.ui.Modal, title="Definir preço de venda"):
     price: discord.ui.TextInput[ProductPriceModal] = discord.ui.TextInput(
-        label="Preço unitário (deixe vazio para remover)",
+        label="Preço unitário de venda",
         placeholder="Ex.: 125.50",
-        required=False,
+        required=True,
         max_length=30,
     )
 
@@ -1174,12 +1210,12 @@ class ProductPriceModal(discord.ui.Modal, title="Definir preço de venda"):
             return
         try:
             text = str(self.price).strip().replace(",", ".")
-            price = Decimal(text) if text else None
+            price = Decimal(text)
             self.database.set_product_price(interaction.guild_id, self.product.id, price)
         except (InvalidOperation, ValueError) as exc:
             await interaction.response.send_message(str(exc), ephemeral=True, delete_after=15)
             return
-        description = money(price) if price is not None else "sem preço"
+        description = money(price)
         await interaction.response.send_message(
             f"**{self.product.name}** atualizado para **{description}**.",
             ephemeral=True,
@@ -1310,6 +1346,64 @@ class SaleProductView(discord.ui.View):
         self.add_item(SaleProductSelect(database, products))
 
 
+class SaleStockInputModal(discord.ui.Modal, title="Adicionar estoque de venda"):
+    quantity: discord.ui.TextInput[SaleStockInputModal] = discord.ui.TextInput(
+        label="Quantidade adicionada", placeholder="Ex.: 10", min_length=1, max_length=30
+    )
+
+    def __init__(self, database: Database, product: Product) -> None:
+        super().__init__()
+        self.database = database
+        self.product = product
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        try:
+            quantity = Decimal(str(self.quantity).strip().replace(",", "."))
+            entry_id = self.database.add_stock_input(
+                guild_id=interaction.guild_id,
+                actor_id=interaction.user.id,
+                product=self.product,
+                quantity=quantity,
+            )
+        except (InvalidOperation, ValueError) as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True, delete_after=15)
+            return
+        await interaction.response.send_message(
+            f"✅ Entrada `#{entry_id}`: **{format(quantity, 'f')} {self.product.name}**.",
+            ephemeral=True,
+            delete_after=10,
+        )
+        await refresh_panels(interaction, self.database)
+
+
+class SaleStockInputSelect(discord.ui.Select["SaleStockInputView"]):
+    def __init__(self, database: Database, products: list[Product]) -> None:
+        self.database = database
+        self.products = {str(product.id): product for product in products}
+        super().__init__(
+            placeholder="Selecione o produto de venda",
+            options=[
+                discord.SelectOption(label=product.name, value=str(product.id))
+                for product in products
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.send_modal(
+            SaleStockInputModal(self.database, self.products[self.values[0]])
+        )
+
+
+class SaleStockInputView(discord.ui.View):
+    def __init__(self, database: Database, products: list[Product]) -> None:
+        super().__init__(timeout=120)
+        self.add_item(SaleStockInputSelect(database, products))
+
+
 class SalesPeriodSelect(discord.ui.Select["SalesReportView"]):
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -1412,6 +1506,7 @@ class DataToolsView(discord.ui.View):
             "farm_channels": "Salas FARME",
             "farm_entries": "Coletas",
             "stock_outputs": "Saídas de estoque",
+            "stock_inputs": "Entradas de produtos de venda",
             "goals": "Metas",
             "sales": "Vendas",
             "cash_transactions": "Movimentações de caixa",
@@ -1440,10 +1535,233 @@ class DataToolsView(discord.ui.View):
         )
 
 
-class ConfigPanel(discord.ui.View):
+MENU_OPTIONS: dict[str, list[discord.SelectOption]] = {
+    "rooms": [
+        discord.SelectOption(label="Criar sala FARME", value="room_create", emoji="🔒"),
+        discord.SelectOption(label="Excluir sala FARME", value="room_delete", emoji="🗑️"),
+    ],
+    "products": [
+        discord.SelectOption(label="Cadastrar produto FARME", value="farm_product", emoji="📦"),
+        discord.SelectOption(label="Cadastrar produto VENDA", value="sale_product", emoji="🏷️"),
+        discord.SelectOption(label="Adicionar estoque de venda", value="sale_stock", emoji="📥"),
+        discord.SelectOption(label="Alterar preços", value="prices", emoji="💲"),
+        discord.SelectOption(label="Remover produto", value="remove_product", emoji="➖"),
+        discord.SelectOption(label="Saída manual de estoque", value="stock_output", emoji="📤"),
+    ],
+    "goals": [
+        discord.SelectOption(label="Criar meta", value="goal_create", emoji="🎯"),
+        discord.SelectOption(label="Editar meta", value="goal_edit", emoji="✏️"),
+        discord.SelectOption(label="Encerrar meta", value="goal_close", emoji="🏁"),
+        discord.SelectOption(label="Regra de divisão", value="distribution_rule", emoji="⚖️"),
+    ],
+    "finance": [
+        discord.SelectOption(label="Entrada no caixa", value="cash_income", emoji="💰"),
+        discord.SelectOption(label="Saída do caixa", value="cash_expense", emoji="💸"),
+        discord.SelectOption(label="Reserva da firma", value="reserve", emoji="🏦"),
+        discord.SelectOption(label="Registrar venda", value="sale", emoji="🛒"),
+        discord.SelectOption(label="Relatório de vendas", value="sales_report", emoji="📊"),
+    ],
+    "admin": [
+        discord.SelectOption(label="Consultar membro", value="member_report", emoji="🔎"),
+        discord.SelectOption(label="Atualizar painel", value="refresh", emoji="🔄"),
+        discord.SelectOption(label="Dados e reset", value="data_tools", emoji="🗄️"),
+    ],
+}
+
+
+class AdminCategorySelect(discord.ui.Select["AdminCategoryView"]):
+    def __init__(self, database: Database, category: str) -> None:
+        self.database = database
+        super().__init__(placeholder="Escolha uma ação", options=MENU_OPTIONS[category])
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction) or interaction.guild_id is None:
+            return
+        action = self.values[0]
+        guild_id = interaction.guild_id
+        if action == "room_create":
+            selection_view = MemberSelectView(self.database)
+            await interaction.response.send_message(
+                "Escolha a pessoa que terá acesso ao canal:",
+                view=selection_view,
+                ephemeral=True,
+            )
+            selection_view.source_message = await interaction.original_response()
+            return
+        if action == "room_delete":
+            if interaction.guild is None:
+                return
+            farm_channels = self.database.list_farm_channels(guild_id)
+            if not farm_channels:
+                await interaction.response.send_message(
+                    "Nenhuma sala FARME está cadastrada.", ephemeral=True, delete_after=10
+                )
+                return
+            names: dict[int, str] = {}
+            for item in farm_channels[:25]:
+                member = interaction.guild.get_member(item.member_id)
+                names[item.member_id] = (
+                    member.display_name if member else f"Usuário {item.member_id}"
+                )
+            await interaction.response.send_message(
+                "Escolha a sala FARME que deseja excluir:",
+                view=DeleteFarmRoomView(
+                    self.database, interaction.guild, farm_channels, names
+                ),
+                ephemeral=True,
+            )
+            return
+        if action == "farm_product":
+            await interaction.response.send_modal(ProductModal(self.database))
+            return
+        if action == "sale_product":
+            await interaction.response.send_modal(SaleProductModal(self.database))
+            return
+        if action in {"sale_stock", "prices", "sale"}:
+            products = self.database.list_products(guild_id, kind="sale")
+            if not products:
+                await interaction.response.send_message(
+                    "Nenhum produto de venda foi cadastrado.", ephemeral=True, delete_after=12
+                )
+                return
+            if action == "sale_stock":
+                view: discord.ui.View = SaleStockInputView(self.database, products)
+                text = "Selecione o produto que entrou no estoque:"
+            elif action == "prices":
+                view = ProductPriceView(self.database, products)
+                text = "Selecione o produto cujo preço deseja alterar:"
+            else:
+                view = SaleProductView(self.database, products)
+                text = "Selecione o produto vendido:"
+            await interaction.response.send_message(text, view=view, ephemeral=True)
+            return
+        if action in {"remove_product", "stock_output"}:
+            products = self.database.list_products(guild_id)
+            if not products:
+                await interaction.response.send_message(
+                    "A lista de produtos está vazia.", ephemeral=True, delete_after=10
+                )
+                return
+            view = (
+                RemoveProductView(self.database, products)
+                if action == "remove_product"
+                else OutputProductView(self.database, products)
+            )
+            await interaction.response.send_message(
+                "Selecione o produto:", view=view, ephemeral=True
+            )
+            return
+        if action == "goal_create":
+            await interaction.response.send_modal(GoalPeriodModal(self.database))
+            return
+        if action in {"goal_edit", "goal_close"}:
+            goal = self.database.get_active_goal(guild_id)
+            if goal is None:
+                await interaction.response.send_message(
+                    "Não existe uma meta ativa.", ephemeral=True, delete_after=10
+                )
+                return
+            if action == "goal_edit":
+                await interaction.response.send_modal(
+                    EditGoalModal(self.database, goal.id, goal.start_at, goal.end_at)
+                )
+            else:
+                try:
+                    preview = build_settlement_preview(self.database, guild_id)
+                except ValueError as exc:
+                    await interaction.response.send_message(
+                        str(exc), ephemeral=True, delete_after=15
+                    )
+                    return
+                await interaction.response.send_message(
+                    embed=settlement_embed(preview),
+                    view=SettlementConfirmView(self.database, guild_id),
+                    ephemeral=True,
+                )
+            return
+        if action == "distribution_rule":
+            current = self.database.get_distribution_rule(guild_id)
+            await interaction.response.send_message(
+                f"Regra vigente: **{distribution_rule_name(current)}**.",
+                view=DistributionRuleView(self.database, current),
+                ephemeral=True,
+            )
+            return
+        if action in {"cash_income", "cash_expense"}:
+            await interaction.response.send_modal(
+                CashTransactionModal(
+                    self.database, "income" if action == "cash_income" else "expense"
+                )
+            )
+            return
+        if action == "reserve":
+            await interaction.response.send_modal(
+                ReserveRateModal(self.database, self.database.get_reserve_rate(guild_id))
+            )
+            return
+        if action == "sales_report":
+            await interaction.response.send_message(
+                embed=build_sales_embed(self.database, guild_id, "week"),
+                view=SalesReportView(self.database),
+                ephemeral=True,
+            )
+            return
+        if action == "member_report":
+            await interaction.response.send_message(
+                "Escolha a pessoa:",
+                view=AdminMemberReportView(self.database),
+                ephemeral=True,
+            )
+            return
+        if action == "refresh":
+            await interaction.response.edit_message(
+                embed=build_admin_embed(self.database, guild_id), view=ConfigPanel(self.database)
+            )
+            return
+        await interaction.response.send_message(
+            "Consulte os dados ou configure o reset protegido.",
+            view=DataToolsView(self.database),
+            ephemeral=True,
+        )
+
+
+class AdminCategoryView(discord.ui.View):
+    def __init__(self, database: Database, category: str) -> None:
+        super().__init__(timeout=180)
+        self.add_item(AdminCategorySelect(database, category))
+
+
+class AdminCategoryButton(discord.ui.Button["ConfigPanel"]):
+    def __init__(self, database: Database, category: str, label: str, emoji: str) -> None:
+        super().__init__(
+            label=label,
+            emoji=emoji,
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"fdm:menu:{category}",
+        )
+        self.database = database
+        self.category = category
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if not await _require_admin(interaction):
+            return
+        await interaction.response.send_message(
+            f"Menu **{self.label}**:",
+            view=AdminCategoryView(self.database, self.category),
+            ephemeral=True,
+        )
+
+
+class _LegacyConfigPanel(discord.ui.View):  # pragma: no cover
     def __init__(self, database: Database) -> None:
         super().__init__(timeout=None)
         self.database = database
+        self.clear_items()
+        self.add_item(AdminCategoryButton(database, "rooms", "Salas FARME", "🔐"))
+        self.add_item(AdminCategoryButton(database, "products", "Produtos / Estoque", "📦"))
+        self.add_item(AdminCategoryButton(database, "goals", "Metas", "🎯"))
+        self.add_item(AdminCategoryButton(database, "finance", "Financeiro / Vendas", "💰"))
+        self.add_item(AdminCategoryButton(database, "admin", "Administração", "⚙️"))
 
     @discord.ui.button(
         label="Criar sala FARME",
@@ -1742,7 +2060,7 @@ class ConfigPanel(discord.ui.View):
     ) -> None:
         if not await _require_admin(interaction) or interaction.guild_id is None:
             return
-        products = self.database.list_products(interaction.guild_id)
+        products = self.database.list_products(interaction.guild_id, kind="sale")
         if not products:
             await interaction.response.send_message(
                 "Cadastre um produto primeiro.", ephemeral=True, delete_after=10
@@ -1768,7 +2086,7 @@ class ConfigPanel(discord.ui.View):
             return
         products = [
             product
-            for product in self.database.list_products(interaction.guild_id)
+            for product in self.database.list_products(interaction.guild_id, kind="sale")
             if product.sale_price is not None
         ]
         if not products:
@@ -1819,3 +2137,15 @@ class ConfigPanel(discord.ui.View):
             view=DataToolsView(self.database),
             ephemeral=True,
         )
+
+
+class ConfigPanel(discord.ui.View):
+    """Compact persistent administrative menu grouped by business area."""
+
+    def __init__(self, database: Database) -> None:
+        super().__init__(timeout=None)
+        self.add_item(AdminCategoryButton(database, "rooms", "Salas FARME", "🔐"))
+        self.add_item(AdminCategoryButton(database, "products", "Produtos / Estoque", "📦"))
+        self.add_item(AdminCategoryButton(database, "goals", "Metas", "🎯"))
+        self.add_item(AdminCategoryButton(database, "finance", "Financeiro / Vendas", "💰"))
+        self.add_item(AdminCategoryButton(database, "admin", "Administração", "⚙️"))

@@ -59,14 +59,9 @@ def test_removing_product_also_removes_it_from_active_goal(tmp_path) -> None:
 def test_sale_updates_stock_cash_and_reports(tmp_path) -> None:
     database = Database(str(tmp_path / "bot.db"))
     database.initialize()
-    product = database.add_product(1, "Cobre", Decimal("25.50"))
-    database.add_entry(
-        guild_id=1,
-        member_id=10,
-        actor_id=10,
-        actor_was_admin=False,
-        product=product,
-        quantity=Decimal("10"),
+    product = database.add_product(1, "Cobre", Decimal("25.50"), kind="sale")
+    database.add_stock_input(
+        guild_id=1, actor_id=10, product=product, quantity=Decimal("10")
     )
 
     sale = database.register_sale(
@@ -86,23 +81,18 @@ def test_sale_updates_stock_cash_and_reports(tmp_path) -> None:
 
     database.set_product_price(1, product.id, Decimal("30"))
     assert database.list_products(1)[0].sale_price == Decimal("30")
-    database.set_product_price(1, product.id, None)
-    assert database.list_products(1)[0].sale_price is None
+    with pytest.raises(ValueError, match="maior que zero"):
+        database.set_product_price(1, product.id, None)
 
 
 def test_protected_reset_preserves_configuration(tmp_path) -> None:
     database = Database(str(tmp_path / "bot.db"))
     database.initialize()
-    product = database.add_product(1, "Cobre", Decimal("10"))
+    product = database.add_product(1, "Cobre", Decimal("10"), kind="sale")
     database.save_farm_channel(1, 10, 100)
     database.set_reset_role(1, 500)
-    database.add_entry(
-        guild_id=1,
-        member_id=10,
-        actor_id=10,
-        actor_was_admin=False,
-        product=product,
-        quantity=Decimal("2"),
+    database.add_stock_input(
+        guild_id=1, actor_id=10, product=product, quantity=Decimal("2")
     )
     database.add_cash_transaction(
         guild_id=1, actor_id=99, kind="income", amount=Decimal("20"), reason="Teste"
