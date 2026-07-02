@@ -75,6 +75,7 @@ async def refresh_guild_panels(
     *,
     farm_member_id: int | None = None,
     refresh_all_farms: bool = False,
+    refresh_views: bool = False,
 ) -> None:
     """Refresh panels concurrently, optionally limiting FARME updates to one member."""
     tasks: list[asyncio.Task[None]] = []
@@ -83,7 +84,11 @@ async def refresh_guild_panels(
         channel = guild.get_channel(channel_id)
         if isinstance(channel, discord.TextChannel):
             tasks.append(
-                asyncio.create_task(_edit_admin_panel(channel, message_id, admin_embed, database))
+                asyncio.create_task(
+                    _edit_admin_panel(
+                        channel, message_id, admin_embed, database, refresh_views
+                    )
+                )
             )
     farm_channels = database.list_farm_channels(guild.id)
     if not refresh_all_farms:
@@ -100,6 +105,7 @@ async def refresh_guild_panels(
                         farm_channel.panel_message_id,
                         build_farm_embed(database, guild.id, farm_channel.member_id),
                         database,
+                        refresh_views,
                     )
                 )
             )
@@ -112,10 +118,14 @@ async def _edit_admin_panel(
     message_id: int,
     embed: discord.Embed,
     database: Database,
+    refresh_view: bool = False,
 ) -> None:
     with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
         message = channel.get_partial_message(message_id)
-        await message.edit(embed=embed, view=ConfigPanel(database))
+        if refresh_view:
+            await message.edit(embed=embed, view=ConfigPanel(database))
+        else:
+            await message.edit(embed=embed)
 
 
 async def _edit_farm_panel(
@@ -123,10 +133,14 @@ async def _edit_farm_panel(
     message_id: int,
     embed: discord.Embed,
     database: Database,
+    refresh_view: bool = False,
 ) -> None:
     with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
         message = channel.get_partial_message(message_id)
-        await message.edit(embed=embed, view=FarmPanel(database))
+        if refresh_view:
+            await message.edit(embed=embed, view=FarmPanel(database))
+        else:
+            await message.edit(embed=embed)
 
 
 async def refresh_panels(
@@ -354,7 +368,6 @@ class QuantityModal(discord.ui.Modal, title="Registrar produto coletado"):
             refresh = asyncio.gather(
                 self.panel_message.edit(
                     embed=build_farm_embed(self.database, interaction.guild_id, self.member_id),
-                    view=FarmPanel(self.database),
                 ),
                 refresh_panels(interaction, self.database),
             )

@@ -223,7 +223,7 @@ class DiscordBot(discord.Client):
             await self._restore_farm_panels()
         if not self._admin_panels_restored:
             for guild in self.guilds:
-                await refresh_guild_panels(guild, self.database)
+                await refresh_guild_panels(guild, self.database, refresh_views=True)
             self._admin_panels_restored = True
 
     async def _restore_farm_panels(self) -> None:
