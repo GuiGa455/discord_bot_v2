@@ -4,7 +4,12 @@ from unittest.mock import AsyncMock, Mock
 import discord
 import pytest
 
-from discord_bot_v2.audit import send_cash_log, send_entry_log, send_output_log
+from discord_bot_v2.audit import (
+    send_cash_log,
+    send_entry_log,
+    send_output_log,
+    send_stock_input_log,
+)
 from discord_bot_v2.database import Database, Product
 
 
@@ -51,6 +56,14 @@ async def test_sends_entry_and_output_to_configured_channels(tmp_path) -> None:
         reason="Venda para cliente",
         output_id=1,
     )
+    await send_stock_input_log(
+        guild=guild,
+        database=database,
+        actor_id=20,
+        product=product,
+        quantity=Decimal("3"),
+        input_id=2,
+    )
     await send_cash_log(
         guild=guild,
         database=database,
@@ -63,6 +76,8 @@ async def test_sends_entry_and_output_to_configured_channels(tmp_path) -> None:
     )
 
     assert entry_channel.send.await_args.kwargs["embed"].title == "📥 Entrada no estoque"
+    assert entry_channel.send.await_count == 2
+    assert entry_channel.send.await_args.kwargs["embed"].footer.text == "Movimentação #2"
     assert "Saída #1" in output_channel.send.await_args.args[0]
     assert cash_channel.send.await_args.kwargs["embed"].title == "Entrada no caixa"
 

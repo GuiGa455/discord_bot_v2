@@ -76,6 +76,39 @@ async def send_entry_log(
     )
 
 
+async def send_stock_input_log(
+    *,
+    guild: discord.Guild,
+    database: Database,
+    actor_id: int,
+    product: Product,
+    quantity: Decimal,
+    input_id: int,
+) -> None:
+    """Send an audit entry for stock added outside a FARME room."""
+    channels = database.get_log_channels(guild.id)
+    if channels is None:
+        return
+    channel = await _resolve_text_channel(guild, channels.entry_channel_id)
+    if channel is None:
+        return
+    embed = discord.Embed(title="📥 Entrada no estoque", color=discord.Color.green())
+    embed.add_field(name="Produto", value=product.name)
+    embed.add_field(name="Quantidade", value=format(quantity, "f"))
+    embed.add_field(name="Registrado por", value=f"<@{actor_id}>")
+    embed.add_field(name="Origem", value="Entrada manual", inline=False)
+    embed.set_footer(text=f"Movimentação #{input_id}")
+    await _send_log(
+        guild,
+        channel,
+        embed,
+        (
+            f"📥 Entrada #{input_id}: {format(quantity, 'f')} {product.name}, "
+            f"registrada por <@{actor_id}>."
+        ),
+    )
+
+
 async def send_output_log(
     *,
     guild: discord.Guild,

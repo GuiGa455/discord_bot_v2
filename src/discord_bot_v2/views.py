@@ -12,7 +12,12 @@ from decimal import Decimal, InvalidOperation
 
 import discord
 
-from discord_bot_v2.audit import send_cash_log, send_entry_log, send_output_log
+from discord_bot_v2.audit import (
+    send_cash_log,
+    send_entry_log,
+    send_output_log,
+    send_stock_input_log,
+)
 from discord_bot_v2.database import (
     PROPORTIONAL_RULE,
     TIERED_BONUS_RULE,
@@ -252,6 +257,7 @@ class ProductKindSelect(discord.ui.Select["ProductKindView"]):
             else SaleProductModal(self.database)
         )
         await interaction.response.send_modal(modal)
+        await _delete_temporary_message(interaction)
 
 
 class ProductKindView(discord.ui.View):
@@ -1287,6 +1293,7 @@ class ProductPriceSelect(discord.ui.Select["ProductPriceView"]):
         await interaction.response.send_modal(
             ProductPriceModal(self.database, self.products[self.values[0]])
         )
+        await _delete_temporary_message(interaction)
 
 
 class ProductPriceView(discord.ui.View):
@@ -1376,6 +1383,7 @@ class SaleProductSelect(discord.ui.Select["SaleProductView"]):
         await interaction.response.send_modal(
             SaleQuantityModal(self.database, self.products[self.values[0]])
         )
+        await _delete_temporary_message(interaction)
 
 
 class SaleProductView(discord.ui.View):
@@ -1413,7 +1421,21 @@ class SaleStockInputModal(discord.ui.Modal, title="Entrada de estoque"):
             ephemeral=True,
             delete_after=10,
         )
-        await refresh_panels(interaction, self.database)
+        refresh = refresh_panels(interaction, self.database)
+        if interaction.guild is not None:
+            await asyncio.gather(
+                send_stock_input_log(
+                    guild=interaction.guild,
+                    database=self.database,
+                    actor_id=interaction.user.id,
+                    product=self.product,
+                    quantity=quantity,
+                    input_id=entry_id,
+                ),
+                refresh,
+            )
+        else:
+            await refresh
 
 
 class SaleStockInputSelect(discord.ui.Select["SaleStockInputView"]):
@@ -1434,6 +1456,7 @@ class SaleStockInputSelect(discord.ui.Select["SaleStockInputView"]):
         await interaction.response.send_modal(
             SaleStockInputModal(self.database, self.products[self.values[0]])
         )
+        await _delete_temporary_message(interaction)
 
 
 class SaleStockInputView(discord.ui.View):
@@ -1467,9 +1490,7 @@ class StockMovementSelect(discord.ui.Select["StockMovementView"]):
             if self.values[0] == "input"
             else OutputProductView(self.database, products)
         )
-        await interaction.response.send_message(
-            "Selecione o produto:", view=view, ephemeral=True
-        )
+        await interaction.response.edit_message(content="Selecione o produto:", view=view)
 
 
 class StockMovementView(discord.ui.View):
@@ -1607,6 +1628,7 @@ class DataToolsView(discord.ui.View):
         await interaction.response.send_modal(
             ResetDatabaseModal(self.database, interaction.guild_id)
         )
+        await _delete_temporary_message(interaction)
 
 
 MENU_OPTIONS: dict[str, list[discord.SelectOption]] = {

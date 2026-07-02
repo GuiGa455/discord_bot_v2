@@ -17,6 +17,7 @@ from discord_bot_v2.views import (
     GoalTargetModal,
     OutputQuantityModal,
     PeriodReportModal,
+    ProductKindSelect,
     ProductModal,
     ProductPriceModal,
     ProductSelect,
@@ -114,6 +115,20 @@ async def test_sale_product_and_stock_input_modals(database: Database) -> None:
         await stock_modal.on_submit(item)
 
     assert database.stock_totals(1)["Pistola"] == Decimal("10")
+
+
+@pytest.mark.asyncio
+async def test_product_kind_selector_opens_modal_and_removes_menu(database: Database) -> None:
+    select = ProductKindSelect(database)
+    select._values = ["farm"]
+    item = interaction()
+    item.message = None
+
+    with patch("discord_bot_v2.views._require_admin", AsyncMock(return_value=True)):
+        await select.callback(item)
+
+    item.response.send_modal.assert_awaited_once()
+    item.delete_original_response.assert_awaited_once()
 
 
 def test_admin_panel_groups_direct_actions_by_row(database: Database) -> None:
