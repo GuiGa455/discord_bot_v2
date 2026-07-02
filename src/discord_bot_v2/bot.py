@@ -77,8 +77,8 @@ class DiscordBot(discord.Client):
             )
             return
         await interaction.response.send_message(
-            "Ferramentas protegidas de consulta e reset:",
-            view=DataToolsView(self.database),
+            "Ferramentas privadas de consulta e reset:",
+            view=DataToolsView(self.database, interaction.user.id),
             ephemeral=True,
         )
 

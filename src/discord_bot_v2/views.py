@@ -1527,49 +1527,27 @@ class SalesReportView(discord.ui.View):
         self.add_item(SalesPeriodSelect(database))
 
 
-class ResetRoleSelect(discord.ui.RoleSelect["DataToolsView"]):
-    def __init__(self, database: Database) -> None:
-        super().__init__(placeholder="Definir cargo autorizado para reset", max_values=1)
-        self.database = database
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        if not await _require_admin(interaction) or interaction.guild_id is None:
-            return
-        role = self.values[0]
-        self.database.set_reset_role(interaction.guild_id, role.id)
-        await interaction.response.send_message(
-            f"Cargo <@&{role.id}> autorizado para reset.", ephemeral=True, delete_after=10
-        )
-
-
 class ResetDatabaseModal(discord.ui.Modal, title="Resetar dados operacionais"):
     confirmation: discord.ui.TextInput[ResetDatabaseModal] = discord.ui.TextInput(
         label="Confirmação exigida", min_length=1, max_length=40
     )
 
-    def __init__(self, database: Database, guild_id: int) -> None:
+    def __init__(self, database: Database, guild_id: int, owner_id: int) -> None:
         super().__init__()
         self.database = database
         self.guild_id = guild_id
-        self.confirmation.placeholder = f"Digite RESETAR {guild_id}"
+        self.owner_id = owner_id
+        self.confirmation.placeholder = "Digite RESETAR"
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        if not await _require_admin(interaction) or not isinstance(
-            interaction.user, discord.Member
-        ):
-            return
-        role_id = self.database.get_reset_role(self.guild_id)
-        has_role = role_id is not None and any(
-            role.id == role_id for role in interaction.user.roles
-        )
-        if not has_role:
+        if interaction.user.id != self.owner_id:
             await interaction.response.send_message(
-                "Você não possui o cargo específico autorizado para reset.",
+                "Somente o proprietário da aplicação pode confirmar o reset.",
                 ephemeral=True,
                 delete_after=15,
             )
             return
-        if str(self.confirmation).strip() != f"RESETAR {self.guild_id}":
+        if str(self.confirmation).strip().upper() != "RESETAR":
             await interaction.response.send_message(
                 "Confirmação incorreta. Nenhum dado foi apagado.", ephemeral=True, delete_after=15
             )
@@ -1584,16 +1562,16 @@ class ResetDatabaseModal(discord.ui.Modal, title="Resetar dados operacionais"):
 
 
 class DataToolsView(discord.ui.View):
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, owner_id: int) -> None:
         super().__init__(timeout=300)
         self.database = database
-        self.add_item(ResetRoleSelect(database))
+        self.owner_id = owner_id
 
-    @discord.ui.button(label="Resumo do banco", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Resumo do banco", style=discord.ButtonStyle.secondary, row=0)
     async def summary(
         self, interaction: discord.Interaction, _: discord.ui.Button[DataToolsView]
     ) -> None:
-        if not await _require_admin(interaction) or interaction.guild_id is None:
+        if interaction.user.id != self.owner_id or interaction.guild_id is None:
             return
         summary = self.database.database_summary(interaction.guild_id)
         labels = {
@@ -1612,21 +1590,14 @@ class DataToolsView(discord.ui.View):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="Reset protegido", style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(label="Reset protegido", style=discord.ButtonStyle.danger, row=0)
     async def reset(
         self, interaction: discord.Interaction, _: discord.ui.Button[DataToolsView]
     ) -> None:
-        if not await _require_admin(interaction) or interaction.guild_id is None:
-            return
-        if self.database.get_reset_role(interaction.guild_id) is None:
-            await interaction.response.send_message(
-                "Defina primeiro o cargo autorizado no seletor acima.",
-                ephemeral=True,
-                delete_after=15,
-            )
+        if interaction.user.id != self.owner_id or interaction.guild_id is None:
             return
         await interaction.response.send_modal(
-            ResetDatabaseModal(self.database, interaction.guild_id)
+            ResetDatabaseModal(self.database, interaction.guild_id, self.owner_id)
         )
         await _delete_temporary_message(interaction)
 
@@ -1816,7 +1787,7 @@ class AdminCategorySelect(discord.ui.Select["AdminCategoryView"]):  # pragma: no
             return
         await interaction.response.send_message(
             "Consulte os dados ou configure o reset protegido.",
-            view=DataToolsView(self.database),
+            view=DataToolsView(self.database, interaction.user.id),
             ephemeral=True,
         )
 
@@ -2271,7 +2242,7 @@ class ConfigPanel(discord.ui.View):
             return
         await interaction.response.send_message(
             "Consulte o resumo ou configure o cargo necessário para um reset protegido.",
-            view=DataToolsView(self.database),
+            view=DataToolsView(self.database, interaction.user.id),
             ephemeral=True,
         )
 

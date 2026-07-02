@@ -155,8 +155,8 @@ O comando privado `/dados_reset_fdm` mostra um resumo das tabelas do servidor e 
 ser aberto pelo proprietário da aplicação registrado no Discord Developer Portal. O reset preserva
 produtos, preços, salas FARME, painéis, canais de log e configurações, mas apaga coletas,
 estoque, metas, vendas e movimentações do caixa. Para executá-lo é necessário ser
-administrador, possuir o cargo específico configurado no seletor e digitar a confirmação
-exata exibida pelo bot.
+o proprietário da aplicação e digitar somente a confirmação `RESETAR`. O menu e o
+formulário validam novamente a identidade do proprietário.
 
 ## Estrutura
 
